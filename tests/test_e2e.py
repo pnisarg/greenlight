@@ -74,3 +74,63 @@ def test_push_through_gate_forwards_clean_change(env):
     # The hook runs the pipeline; on pass it forwards to origin.
     assert res.returncode == 0, res.stderr
     assert _origin_has_branch(origin, "feat/add-greeting"), res.stderr
+
+
+def test_greenlight_run_forwards_clean_change(env):
+    """The explicit `greenlight run` path validates in a worktree off the bare
+    repo and forwards the result to origin (regression: it must run the pipeline
+    once and forward from the bare repo, not the root)."""
+    from greenlight import gate
+
+    tmp_path, work, origin = env
+    gate.init(str(work))
+
+    _git(["checkout", "-b", "feat/run-path"], work)
+    (work / "mod.py").write_text("def add(a, b):\n    return a + b\n")
+    _git(["add", "-A"], work)
+    _git(["commit", "-m", "feat: add module"], work)
+
+    res = subprocess.run(
+        ["python", "-m", "greenlight", "run", "--intent", "Add an add() helper"],
+        cwd=work, capture_output=True, text=True,
+    )
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert _origin_has_branch(origin, "feat/run-path"), res.stdout + res.stderr
+
+
+def test_greenlight_run_emits_event_stream(env):
+    """With GREENLIGHT_EVENTS set, a full passing run writes a structured JSONL
+    stream from run_start through run_end (the handoff contract the UI renders)."""
+    import json
+
+    from greenlight import gate
+
+    tmp_path, work, origin = env
+    gate.init(str(work))
+
+    _git(["checkout", "-b", "feat/events"], work)
+    (work / "calc.py").write_text("def mul(a, b):\n    return a * b\n")
+    _git(["add", "-A"], work)
+    _git(["commit", "-m", "feat: add mul"], work)
+
+    events_path = tmp_path / "events.jsonl"
+    res = subprocess.run(
+        ["python", "-m", "greenlight", "run", "--intent", "Add a mul() helper"],
+        cwd=work, capture_output=True, text=True,
+        env={**os.environ, "GREENLIGHT_EVENTS": str(events_path)},
+    )
+    assert res.returncode == 0, res.stdout + res.stderr
+
+    recs = [json.loads(line) for line in events_path.read_text().splitlines()]
+    types = [r["type"] for r in recs]
+    assert types[0] == "run_start"
+    assert types[-1] == "run_end"
+    assert recs[-1]["passed"] is True
+    # Core stages all show up.
+    for t in ("intent", "lint", "review_round", "reviewer", "verify"):
+        assert t in types, (t, types)
+    # Intent was supplied, not reconstructed.
+    intent_ev = next(r for r in recs if r["type"] == "intent")
+    assert intent_ev["source"] == "supplied"
+    # Classification is backend for a lone .py change.
+    assert recs[0]["classification"] == "backend"

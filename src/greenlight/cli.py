@@ -66,32 +66,67 @@ def _cmd_run(args) -> int:
     base = gitx.merge_base(root, "HEAD", f"{cfg.push_target}/{default_branch}") or ""
 
     rid = gate._repo_id(root)
-    bare = gate.bare_path(rid)
-    if not (bare / "HEAD").exists():
+    bare = str(gate.bare_path(rid))
+    if not (gate.bare_path(rid) / "HEAD").exists():
         raise GreenlightError("gate not initialized; run `greenlight init` first")
 
-    # Make the branch tip available in the bare repo, then validate it there.
-    run(["git", "push", "--force", gate.REMOTE_NAME, f"HEAD:refs/heads/{branch}"],
-        cwd=root)
-    # The push itself triggers the hook; but for the explicit path we run inline
-    # against a fresh worktree so output is synchronous and unambiguous.
+    # Make the branch + objects available in the bare repo via fetch. fetch does
+    # NOT fire the post-receive hook (only pushes do), so the pipeline runs once
+    # here inline rather than also being triggered by the gate.
+    fetched = run(["git", "fetch", "--force", root,
+                   f"refs/heads/{branch}:refs/heads/{branch}"], cwd=bare)
+    if not fetched.ok:
+        raise GreenlightError(f"could not stage branch into gate: {fetched.err.strip()[:300]}")
+
     with worktree.checkout(bare, branch, head) as wt:
         passed = run_pipeline(wt, cfg, branch, base, default_branch, _read_intent(args))
     if passed:
-        _forward(root, cfg, branch)
+        _forward(bare, cfg.push_target, branch)
+        _sync_local_branch(root, bare, branch)
         return 0
     fail("pipeline did not pass; nothing forwarded")
     return 1
 
 
-def _forward(root: str, cfg: config.Config, branch: str) -> None:
-    step(f"forwarding {branch} -> {cfg.push_target}")
-    r = run(["git", "push", cfg.push_target, f"refs/heads/{branch}:refs/heads/{branch}"],
-            cwd=root)
+def _forward(bare: str, push_target: str, branch: str) -> None:
+    """Forward the validated branch from the bare gate repo to the real remote.
+
+    The pipeline's fix commits live on the bare repo's branch ref (the worktree
+    was created off the bare repo), so forwarding must originate there — the
+    bare repo's `origin` remote points at the configured push target's URL.
+    """
+    step(f"forwarding {branch} -> {push_target}")
+    r = run(["git", "push", "origin", f"refs/heads/{branch}:refs/heads/{branch}"],
+            cwd=bare)
     if r.ok:
-        ok(f"pushed to {cfg.push_target}")
+        ok(f"pushed to {push_target}")
     else:
         fail(f"forward failed: {r.err.strip()[:300]}")
+
+
+def _sync_local_branch(root: str, bare: str, branch: str) -> None:
+    """Fast-forward the user's local branch to include pipeline fix commits.
+
+    The gate may have added lint/review fix commits on top of the user's work.
+    Those now live on the bare repo's branch; pull them back so the local branch
+    matches what was forwarded. Best-effort: skip if the branch isn't checked
+    out cleanly or can't fast-forward.
+    """
+    bare_head = gitx.rev_parse(bare, branch)
+    if not bare_head or bare_head == gitx.rev_parse(root, "HEAD"):
+        return
+    if gitx.current_branch(root) != branch:
+        info(f"gate added fix commits; run `git pull` on {branch} to sync")
+        return
+    dirty = run(["git", "status", "--porcelain"], cwd=root).out.strip()
+    if dirty:
+        info(f"gate added fix commits to {branch}; commit/stash and `git pull` to sync")
+        return
+    ff = run(["git", "merge", "--ff-only", bare_head], cwd=root)
+    if ff.ok:
+        ok(f"local {branch} fast-forwarded to include fix commits")
+    else:
+        info(f"gate added fix commits; run `git pull` on {branch} to sync")
 
 
 def _cmd_hook(args) -> int:
@@ -120,7 +155,8 @@ def _cmd_hook(args) -> int:
         with worktree.checkout(args.bare, branch, new_sha) as wt:
             passed = run_pipeline(wt, cfg, branch, base, default_branch, supplied_intent)
         if passed:
-            _forward(root, cfg, branch)
+            _forward(args.bare, cfg.push_target, branch)
+            _sync_local_branch(root, args.bare, branch)
         else:
             fail(f"{branch} did not pass the gate; not forwarded")
             overall = 1

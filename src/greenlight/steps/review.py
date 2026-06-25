@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 
+from .. import events
 from ..agent import Agent
 from ..config import Config, Reviewer
 from ..util import info, ok, step, warn
@@ -73,13 +74,14 @@ def _parse_findings(payload, reviewer: str) -> list[Finding]:
 
 
 def _run_reviewers(
-    agent: Agent, work_dir: str, cfg: Config, base: str, head: str, intent: str
+    agent: Agent, work_dir: str, cfg: Config, base: str, head: str, intent: str, rnd: int
 ) -> list[Finding]:
     findings: list[Finding] = []
     for r in cfg.reviewers:
         if not r.enabled:
             continue
         info(f"reviewer: {r.name}")
+        events.emit("reviewer", name=r.name, round=rnd, findings=None, blocking=None)
         skills = [r.skill] if r.skill else None
         res = agent.run(
             _reviewer_prompt(r, base, head, intent),
@@ -91,6 +93,7 @@ def _run_reviewers(
         rf = _parse_findings(res.json(), r.name)
         blocking = [f for f in rf if f.blocks(r.blocking_severity)]
         info(f"  {len(rf)} findings ({len(blocking)} blocking)")
+        events.emit("reviewer", name=r.name, round=rnd, findings=len(rf), blocking=len(blocking))
         findings.extend(rf)
     return findings
 
@@ -139,7 +142,8 @@ def run_step(
 
     for rnd in range(1, cfg.max_review_rounds + 1):
         info(f"round {rnd}/{cfg.max_review_rounds}")
-        findings = _run_reviewers(agent, work_dir, cfg, base, head, intent)
+        events.emit("review_round", round=rnd, max_rounds=cfg.max_review_rounds)
+        findings = _run_reviewers(agent, work_dir, cfg, base, head, intent, rnd)
         all_findings = findings
         blocking = _blocking(findings, cfg)
         if not blocking:
@@ -161,6 +165,7 @@ def run_step(
             )
 
         info(f"fixing {len(blocking)} blocking findings (intent-preserving)")
+        events.emit("fix", round=rnd, findings=len(blocking))
         agent.run(_fix_prompt(blocking, intent), cwd=work_dir, timeout=1800)
         if commit_fn(f"fix: address review findings (round {rnd})"):
             # New head after the fix commit so the next round reviews the result.
