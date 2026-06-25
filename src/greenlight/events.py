@@ -87,10 +87,19 @@ def enable_default(repo_root: str, *, truncate: bool = True) -> str:
 
 
 def _open_mirror(path: Path):
-    """Open a truncating, line-buffered mirror sink. Best-effort: None on error."""
+    """Open the per-repo mirror sink. Best-effort: None on error.
+
+    Truncate once for a fresh run, then write through an *append* handle (like
+    `_handle()`'s default-path sink). A plain "w" handle keeps a fixed offset, so
+    if another greenlight process on the same repo truncates this path mid-run
+    (its own enable_default `write_text("")`), our stale offset would strand NUL
+    bytes into the JSONL `greenlight watch` reads. O_APPEND re-seeks to EOF on
+    every write, so a concurrent truncate can't corrupt this stream.
+    """
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        return open(path, "w", buffering=1, encoding="utf-8")
+        path.write_text("")
+        return open(path, "a", buffering=1, encoding="utf-8")
     except OSError:
         return None
 
