@@ -1,0 +1,41 @@
+# greenlight configuration for greenlight itself (dogfooding). See README.
+
+[greenlight]
+max_review_rounds = 3
+push_target = "origin"
+# model = ""   # pi default (LiteLLM gateway)
+evidence_dir = ".greenlight/evidence"
+
+[checks]
+# Lint only — the tree is not ruff-format clean, so no format_cmd (a repo-wide
+# reformat would swamp every diff). `ruff check` flags real errors.
+lint_cmd = "ruff check ."
+
+# Reviewers: each runs as an independent read-only pi agent.
+[[reviewers]]
+name = "brutal"
+focus = "Brutally honest senior review. Real bugs, broken edge cases, race conditions, bad error handling, needless complexity. No style nits (a lint step handles those)."
+blocking_severity = "warning"
+
+[[reviewers]]
+name = "security"
+focus = "Security review: injection, auth gaps, secret leakage, unsafe deserialization, SSRF, path traversal, missing input validation, command/argument injection in subprocess use."
+blocking_severity = "warning"
+
+[verify]
+# Backend tests, run in the throwaway worktree as committed PR evidence.
+# PYTHONPATH=src is required when greenlight is installed editable (`pip -e`):
+# the editable .pth points sys.path at the *main* repo's src, so without this
+# the worktree's changed code would be shadowed and we'd test stale source.
+[[verify.backend]]
+name = "pytest"
+cmd = "PYTHONPATH=src python -m pytest -q"
+
+# No frontend in this repo; leave [verify.frontend] unset so it's skipped.
+# Note: the pi extension's node tests (npm test / tsc) are NOT run by the gate —
+# node_modules is gitignored and absent from the worktree. Run them locally.
+
+[routing]
+# Defaults are fine: *.py -> backend (runs pytest above), *.ts -> frontend
+# (skipped, no frontend server). A mixed Python+TS change runs the backend
+# suite; pure-.ts changes are validated by review + lint only here.

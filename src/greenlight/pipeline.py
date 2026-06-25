@@ -15,7 +15,7 @@ from .steps import pr as pr_step
 from .steps import review as review_step
 from .steps import verify as verify_step
 from .steps.types import StepResult
-from .util import fail, info, ok, run, step
+from .util import fail, info, ok, run
 
 
 def _committer(work_dir: str):
