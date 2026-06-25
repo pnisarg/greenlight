@@ -16,7 +16,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import config, events, gate, gitx, render, worktree
+from . import __version__, config, events, gate, gitx, render, worktree
 from .pipeline import run_pipeline
 from .util import GreenlightError, fail, info, ok, run, step, which
 
@@ -239,6 +239,7 @@ def _cmd_watch(args) -> int:
 
 def _cmd_doctor(args) -> int:
     step("greenlight doctor")
+    info(f"greenlight: {__version__}")
     okk = True
     for tool, required in (("git", True), ("pi", True), ("gh", False)):
         path = which(tool)
@@ -254,6 +255,7 @@ def _cmd_doctor(args) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="greenlight", description="Local git gate driven by pi.")
+    p.add_argument("--version", action="version", version=f"greenlight {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     pi = sub.add_parser("init", help="set up the gate for this repo")

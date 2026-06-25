@@ -24,12 +24,13 @@ blocking_severity = "warning"
 
 [verify]
 # Backend tests, run in the throwaway worktree as committed PR evidence.
-# PYTHONPATH=src is required when greenlight is installed editable (`pip -e`):
-# the editable .pth points sys.path at the *main* repo's src, so without this
-# the worktree's changed code would be shadowed and we'd test stale source.
+# `uv run` builds an isolated venv from the worktree's own pyproject.toml, so it
+# tests the changed source (no editable .pth shadowing the main repo's src) and
+# doesn't depend on a `python` binary or a pre-activated venv being present in
+# the gate's environment.
 [[verify.backend]]
 name = "pytest"
-cmd = "PYTHONPATH=src python -m pytest -q"
+cmd = "uv run --extra dev pytest -q"
 
 # No frontend in this repo; leave [verify.frontend] unset so it's skipped.
 # Note: the pi extension's node tests (npm test / tsc) are NOT run by the gate —
