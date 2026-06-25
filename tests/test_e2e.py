@@ -135,6 +135,24 @@ def test_greenlight_run_emits_event_stream(env):
     # Classification is backend for a lone .py change.
     assert recs[0]["classification"] == "backend"
 
+    # The caller owns the primary stream (its own file), but the run also
+    # mirrors to the per-repo default path so `greenlight watch` can render an
+    # extension-driven run. The mirror should hold the same stream.
+    from greenlight import events
+
+    default = events.default_path(str(work))
+    assert default.exists(), "extension-driven run should mirror to the default path"
+    mirror_types = [json.loads(line)["type"] for line in default.read_text().splitlines()]
+    assert mirror_types[0] == "run_start" and mirror_types[-1] == "run_end"
+
+    watched = subprocess.run(
+        ["python", "-m", "greenlight", "watch", "--once"],
+        cwd=work, capture_output=True, text=True,
+        env={**os.environ, "NO_COLOR": "1"},
+    )
+    assert watched.returncode == 0, watched.stdout + watched.stderr
+    assert "PASSED" in watched.stdout
+
 
 def test_run_writes_default_events_path_and_watch_once_renders(env):
     """With no GREENLIGHT_EVENTS set, the run publishes to the per-repo default

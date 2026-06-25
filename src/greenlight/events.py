@@ -13,7 +13,10 @@ orchestrator owns all control flow; this only observes it.
 The CLI `run`/`hook` paths call `enable_default()` to point the sink at a
 deterministic per-repo file (`default_path`) so `greenlight watch` can tail the
 same stream the gate writes — without the two processes sharing any env. A
-caller-set `GREENLIGHT_EVENTS` (e.g. the pi extension's temp file) always wins.
+caller-set `GREENLIGHT_EVENTS` (e.g. the pi extension's temp file) still owns the
+primary stream, but `enable_default()` then *also* mirrors every event to the
+per-repo path so `greenlight watch` can render extension-driven runs (it has no
+way to learn the caller's private path).
 
 Event shape: {"ts": <float epoch>, "type": <str>, ...payload}. Types map 1:1 to
 the real pipeline stages:
@@ -41,6 +44,7 @@ from pathlib import Path
 from typing import Any
 
 _sink = None  # lazily opened append handle, or False once we've given up
+_mirror = None  # mirror handle to the per-repo default path, or None
 
 
 def default_path(repo_root: str) -> Path:
@@ -62,10 +66,16 @@ def enable_default(repo_root: str, *, truncate: bool = True) -> str:
     caller already set GREENLIGHT_EVENTS (e.g. the pi extension's temp file), it
     wins and the default is left alone.
     """
+    global _mirror
+    p = default_path(repo_root)
     existing = os.environ.get("GREENLIGHT_EVENTS")
     if existing:
+        # A caller (the pi extension) owns the primary stream via its own file.
+        # Mirror to the deterministic per-repo path too, so `greenlight watch`
+        # can render this run — it can't discover the caller's private path.
+        if os.path.abspath(existing) != os.path.abspath(str(p)):
+            _mirror = _open_mirror(p)
         return existing
-    p = default_path(repo_root)
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         if truncate:
@@ -74,6 +84,15 @@ def enable_default(repo_root: str, *, truncate: bool = True) -> str:
         return ""
     os.environ["GREENLIGHT_EVENTS"] = str(p)
     return str(p)
+
+
+def _open_mirror(path: Path):
+    """Open a truncating, line-buffered mirror sink. Best-effort: None on error."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return open(path, "w", buffering=1, encoding="utf-8")
+    except OSError:
+        return None
 
 
 def _handle():
@@ -104,13 +123,18 @@ def _handle():
 
 
 def emit(type: str, **payload: Any) -> None:
-    """Append one event. No-op unless GREENLIGHT_EVENTS is set."""
+    """Append one event to the primary sink and any mirror. No-op when neither is
+    active (i.e. GREENLIGHT_EVENTS unset and no mirror opened)."""
     fh = _handle()
-    if fh is None:
+    if fh is None and _mirror is None:
         return
     rec = {"ts": time.time(), "type": type, **payload}
-    try:
-        fh.write(json.dumps(rec, default=str) + "\n")
-    except (OSError, ValueError):
-        # Never let telemetry break the pipeline.
-        pass
+    line = json.dumps(rec, default=str) + "\n"
+    for sink in (fh, _mirror):
+        if sink is None:
+            continue
+        try:
+            sink.write(line)
+        except (OSError, ValueError):
+            # Never let telemetry break the pipeline.
+            pass
