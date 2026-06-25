@@ -10,6 +10,11 @@ path in the `GREENLIGHT_EVENTS` env var (one JSON object per line). When that va
 is unset, every emit is a no-op, so the gate behaves exactly as before. The
 orchestrator owns all control flow; this only observes it.
 
+The CLI `run`/`hook` paths call `enable_default()` to point the sink at a
+deterministic per-repo file (`default_path`) so `greenlight watch` can tail the
+same stream the gate writes — without the two processes sharing any env. A
+caller-set `GREENLIGHT_EVENTS` (e.g. the pi extension's temp file) always wins.
+
 Event shape: {"ts": <float epoch>, "type": <str>, ...payload}. Types map 1:1 to
 the real pipeline stages:
 
@@ -29,9 +34,43 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 _sink = None  # lazily opened append handle, or False once we've given up
+
+
+def default_path(repo_root: str) -> Path:
+    """Per-repo events file under the greenlight state dir.
+
+    Deterministic from the repo root so `greenlight watch` can resolve the same
+    file the gate writes to, without the two processes sharing any env.
+    """
+    from .util import repo_id, state_dir
+
+    return state_dir() / "runs" / repo_id(repo_root) / "events.jsonl"
+
+
+def enable_default(repo_root: str, *, truncate: bool = True) -> str:
+    """Point the sink at the per-repo default path unless one is already set.
+
+    Returns the active events path. Call this before the pipeline runs (and
+    before any emit, so the lazy sink opens against the right file). When the
+    caller already set GREENLIGHT_EVENTS (e.g. the pi extension's temp file), it
+    wins and the default is left alone.
+    """
+    existing = os.environ.get("GREENLIGHT_EVENTS")
+    if existing:
+        return existing
+    p = default_path(repo_root)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if truncate:
+            p.write_text("")
+    except OSError:
+        return ""
+    os.environ["GREENLIGHT_EVENTS"] = str(p)
+    return str(p)
 
 
 def _handle():

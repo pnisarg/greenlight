@@ -134,3 +134,39 @@ def test_greenlight_run_emits_event_stream(env):
     assert intent_ev["source"] == "supplied"
     # Classification is backend for a lone .py change.
     assert recs[0]["classification"] == "backend"
+
+
+def test_run_writes_default_events_path_and_watch_once_renders(env):
+    """With no GREENLIGHT_EVENTS set, the run publishes to the per-repo default
+    path, and `greenlight watch --once` renders the card from it."""
+    from greenlight import events, gate
+
+    tmp_path, work, origin = env
+    gate.init(str(work))
+
+    _git(["checkout", "-b", "feat/watch"], work)
+    (work / "calc.py").write_text("def sub(a, b):\n    return a - b\n")
+    _git(["add", "-A"], work)
+    _git(["commit", "-m", "feat: add sub"], work)
+
+    # Explicitly ensure the env var is NOT set, so the default path is used.
+    run_env = {k: v for k, v in os.environ.items() if k != "GREENLIGHT_EVENTS"}
+    res = subprocess.run(
+        ["python", "-m", "greenlight", "run", "--intent", "Add a sub() helper"],
+        cwd=work, capture_output=True, text=True, env=run_env,
+    )
+    assert res.returncode == 0, res.stdout + res.stderr
+
+    default = events.default_path(str(work))
+    assert default.exists(), "gate should publish events to the per-repo default path"
+
+    watched = subprocess.run(
+        ["python", "-m", "greenlight", "watch", "--once"],
+        cwd=work, capture_output=True, text=True,
+        env={**run_env, "NO_COLOR": "1"},
+    )
+    assert watched.returncode == 0, watched.stdout + watched.stderr
+    out = watched.stdout
+    assert "greenlight feat/watch" in out
+    assert "intent" in out and "supplied by agent" in out
+    assert "PASSED" in out
