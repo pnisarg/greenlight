@@ -22,7 +22,10 @@ the real pipeline stages:
   intent        {source: "supplied"|"reconstructed", text}
   lint          {status: "pass"|"fail"|"skip", fixed: bool}
   review_round  {round, max_rounds}
-  reviewer      {name, round, findings, blocking}
+  reviewer      {name, round, findings, blocking, items}
+                items: [{severity, file, line, description, blocks}] on the
+                completion event (omitted on the "started" event where findings
+                is null). Consumers may ignore it; it is additive.
   fix           {round, findings}
   verify        {target: "backend"|"frontend", status, evidence}
   pr            {status: "open"|"exists"|"skip"|"fail", url}

@@ -93,9 +93,26 @@ def _run_reviewers(
         rf = _parse_findings(res.json(), r.name)
         blocking = [f for f in rf if f.blocks(r.blocking_severity)]
         info(f"  {len(rf)} findings ({len(blocking)} blocking)")
-        events.emit("reviewer", name=r.name, round=rnd, findings=len(rf), blocking=len(blocking))
+        events.emit(
+            "reviewer",
+            name=r.name,
+            round=rnd,
+            findings=len(rf),
+            blocking=len(blocking),
+            items=[_finding_event(f, f.blocks(r.blocking_severity)) for f in rf],
+        )
         findings.extend(rf)
     return findings
+
+
+def _finding_event(f: Finding, blocks: bool) -> dict:
+    return {
+        "severity": f.severity,
+        "file": f.file,
+        "line": f.line,
+        "description": f.description,
+        "blocks": blocks,
+    }
 
 
 def _blocking(findings: list[Finding], cfg: Config) -> list[Finding]:

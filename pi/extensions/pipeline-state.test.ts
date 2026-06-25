@@ -3,9 +3,12 @@ import { test } from "node:test";
 
 import {
 	applyLines,
+	blockingFindings,
 	initialState,
 	plain,
 	renderCard,
+	stageElapsed,
+	statusLine,
 	summarize,
 } from "./pipeline-state.ts";
 
@@ -135,4 +138,119 @@ test("summarize flags reconstructed intent for the agent", () => {
 	);
 	const out = summarize(s);
 	assert.match(out, /reconstructed from the diff/);
+});
+
+/** A failing run: blocking findings remain after max rounds. */
+const FAILING = [
+	{ ts: 100, type: "run_start", branch: "feat/bug", classification: "backend", files: ["api.py"] },
+	{ ts: 101, type: "intent", source: "supplied", text: "add endpoint" },
+	{ ts: 102, type: "lint", status: "pass", fixed: false },
+	{ ts: 103, type: "review_round", round: 3, max_rounds: 3 },
+	{ ts: 104, type: "reviewer", name: "brutal", round: 3, findings: null, blocking: null },
+	{
+		ts: 130,
+		type: "reviewer",
+		name: "brutal",
+		round: 3,
+		findings: 2,
+		blocking: 1,
+		items: [
+			{ severity: "error", file: "api.py", line: 42, description: "SQL injection in query", blocks: true },
+			{ severity: "info", file: "api.py", line: 5, description: "unused import", blocks: false },
+		],
+	},
+	{ ts: 131, type: "run_end", passed: false },
+]
+	.map((e) => JSON.stringify(e))
+	.join("\n");
+
+test("parses finding items onto the reviewer", () => {
+	const s = initialState();
+	applyLines(s, FAILING);
+	const brutal = s.review.reviewers.find((r) => r.name === "brutal");
+	assert.ok(brutal);
+	assert.equal(brutal.items.length, 2);
+	assert.equal(brutal.items[0].file, "api.py");
+	assert.equal(brutal.items[0].line, 42);
+	assert.equal(brutal.items[0].blocks, true);
+	assert.equal(brutal.items[1].blocks, false);
+});
+
+test("blockingFindings returns only blocking items across reviewers", () => {
+	const s = initialState();
+	applyLines(s, FAILING);
+	const blk = blockingFindings(s);
+	assert.equal(blk.length, 1);
+	assert.match(blk[0].description, /SQL injection/);
+});
+
+test("failure card names the blocked gate and surfaces blocking findings", () => {
+	const s = initialState();
+	applyLines(s, FAILING);
+	assert.equal(s.failedStage, "review");
+	const lines = renderCard(s, plain);
+	assert.ok(lines.some((l) => /blocked at review/.test(l)));
+	assert.ok(lines.some((l) => /SQL injection/.test(l)));
+});
+
+test("expanded mode lists blocking findings under the reviewer", () => {
+	const s = initialState();
+	applyLines(s, FAILING);
+	const lines = renderCard(s, plain, { expanded: true });
+	// Indented finding line under the reviewer (8 spaces) appears before the verdict.
+	assert.ok(lines.some((l) => l.startsWith("        ") && /SQL injection/.test(l)));
+});
+
+test("stageElapsed bounds a stage by the next stage's start", () => {
+	const s = initialState();
+	applyLines(s, FAILING);
+	// review started at 103, run_end (no later stage) at 131 -> ~28s.
+	const secs = stageElapsed(s, "review", s.lastTs);
+	assert.equal(secs, 28);
+	// intent started 100, lint at 102 -> 2s.
+	assert.equal(stageElapsed(s, "intent", s.lastTs), 2);
+});
+
+test("renderCard shows elapsed and a custom spinner on the running stage", () => {
+	const s = initialState();
+	applyLines(
+		s,
+		[
+			{ ts: 1, type: "run_start", branch: "b", classification: "backend", files: ["a.py"] },
+			{ ts: 1, type: "intent", source: "supplied", text: "x" },
+			{ ts: 2, type: "lint", status: "pass", fixed: false },
+			{ ts: 3, type: "review_round", round: 1, max_rounds: 3 },
+			{ ts: 3, type: "reviewer", name: "brutal", round: 1, findings: null, blocking: null },
+		]
+			.map((e) => JSON.stringify(e))
+			.join("\n"),
+	);
+	const lines = renderCard(s, plain, { now: 18, spinner: "◐" });
+	const review = lines.find((l) => l.includes("review"));
+	assert.ok(review);
+	assert.match(review, /◐/); // spinner on the running stage
+	assert.match(review, /\(15s\)/); // 18 - 3 = 15s elapsed
+});
+
+test("statusLine reflects running stage, pass, and fail", () => {
+	const running = initialState();
+	applyLines(
+		running,
+		[
+			{ ts: 1, type: "run_start", branch: "b", classification: "backend", files: ["a.py"] },
+			{ ts: 1, type: "intent", source: "supplied", text: "x" },
+			{ ts: 2, type: "review_round", round: 2, max_rounds: 3 },
+		]
+			.map((e) => JSON.stringify(e))
+			.join("\n"),
+	);
+	assert.match(statusLine(running), /review 2\/3/);
+
+	const passed = initialState();
+	applyLines(passed, PASSING);
+	assert.match(statusLine(passed), /passed/);
+
+	const failed = initialState();
+	applyLines(failed, FAILING);
+	assert.match(statusLine(failed), /failed at review/);
 });
