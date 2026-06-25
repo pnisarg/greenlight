@@ -10,10 +10,14 @@ from greenlight import events
 def _reset_sink():
     """events caches its sink in a module global; reset around each test."""
     events._sink = None
+    events._mirror = None
     yield
     if events._sink not in (None, False):
         events._sink.close()
+    if events._mirror is not None:
+        events._mirror.close()
     events._sink = None
+    events._mirror = None
 
 
 def test_emit_is_noop_without_env(monkeypatch, tmp_path):
@@ -47,6 +51,43 @@ def test_emit_disables_gracefully_on_bad_path(monkeypatch, tmp_path):
     monkeypatch.setenv("GREENLIGHT_EVENTS", str(tmp_path / "nope" / "events.jsonl"))
     events.emit("run_start", branch="x")
     assert events._sink is False
+
+
+def test_enable_default_mirrors_when_caller_owns_primary_stream(monkeypatch, tmp_path):
+    """When a caller (the pi extension) sets GREENLIGHT_EVENTS to its own file,
+    enable_default mirrors events to the per-repo default path too, so
+    `greenlight watch` can render the run."""
+    monkeypatch.setattr("greenlight.util.state_dir", lambda: tmp_path / "state")
+    primary = tmp_path / "caller.jsonl"
+    monkeypatch.setenv("GREENLIGHT_EVENTS", str(primary))
+
+    repo = str(tmp_path / "repo")
+    active = events.enable_default(repo)
+    # Caller's primary stream still wins (its path is returned, env untouched).
+    assert active == str(primary)
+
+    events.emit("run_start", branch="feat/x")
+    events.emit("run_end", passed=True)
+
+    default = events.default_path(repo)
+    # Both the caller's file and the per-repo mirror got every event.
+    assert len(primary.read_text().splitlines()) == 2
+    assert len(default.read_text().splitlines()) == 2
+
+
+def test_enable_default_does_not_mirror_when_env_is_the_default_path(monkeypatch, tmp_path):
+    """If GREENLIGHT_EVENTS already points at the per-repo default path, don't
+    open a redundant self-mirror (which would double every line)."""
+    monkeypatch.setattr("greenlight.util.state_dir", lambda: tmp_path / "state")
+    repo = str(tmp_path / "repo")
+    default = events.default_path(repo)
+    default.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("GREENLIGHT_EVENTS", str(default))
+
+    events.enable_default(repo)
+    assert events._mirror is None
+    events.emit("run_start", branch="feat/x")
+    assert len(default.read_text().splitlines()) == 1
 
 
 def test_claiming_sink_scrubs_env_so_children_dont_inherit(monkeypatch, tmp_path):
