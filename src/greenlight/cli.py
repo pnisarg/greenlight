@@ -4,15 +4,19 @@ Commands:
   greenlight init [--push-target origin]   set up the gate for this repo
   greenlight run --intent "..."            run the pipeline on the current branch
                                            (explicit path; no push needed)
+  greenlight watch                         render the live pipeline card
   greenlight hook --bare ... --work ...    internal: invoked by post-receive
   greenlight doctor                        check environment
 """
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+import time
+from pathlib import Path
 
-from . import config, gate, gitx, worktree
+from . import config, events, gate, gitx, render, worktree
 from .pipeline import run_pipeline
 from .util import GreenlightError, fail, info, ok, run, step, which
 
@@ -69,6 +73,10 @@ def _cmd_run(args) -> int:
     bare = str(gate.bare_path(rid))
     if not (gate.bare_path(rid) / "HEAD").exists():
         raise GreenlightError("gate not initialized; run `greenlight init` first")
+
+    # Publish events to the per-repo default path so `greenlight watch` can find
+    # them (honors a caller-set GREENLIGHT_EVENTS, e.g. the pi extension).
+    events.enable_default(root)
 
     # Make the branch + objects available in the bare repo via fetch. fetch does
     # NOT fire the post-receive hook (only pushes do), so the pipeline runs once
@@ -140,6 +148,9 @@ def _cmd_hook(args) -> int:
     root = args.work
     cfg = config.load(root)
     default_branch = gitx.default_branch(root, cfg.push_target)
+    # Publish events to the per-repo default path so a `greenlight watch` running
+    # in the user's terminal can render this server-side run.
+    events.enable_default(root)
 
     overall = 0
     for old_sha, new_sha, refname in refs:
@@ -169,6 +180,55 @@ def _resolve_base_in_root(root: str, head_sha: str, default_branch: str, push_ta
         if mb:
             return mb
     return gitx.EMPTY_TREE
+
+
+def _cmd_watch(args) -> int:
+    """Tail the per-repo event stream and render the live pipeline card.
+
+    For the human `git push greenlight` path: the gate runs server-side, so the
+    user can't see a UI of their own. Run `greenlight watch` in a second
+    terminal; it renders the same card the pi extension shows.
+    """
+    root = gitx.main_repo_root(args.work or ".")
+    path = Path(os.environ.get("GREENLIGHT_EVENTS") or events.default_path(root))
+    color = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+
+    step(f"watching {path}")
+    if args.once:
+        if not path.exists():
+            fail("no event stream yet; run the gate first (or pass --work)")
+            return 1
+        for line in render.render_card(render.state_from(path.read_text()), color):
+            print(line)
+        return 0
+
+    deadline = time.monotonic() + args.timeout if args.timeout else None
+    last_render = ""
+    printed_lines = 0
+    try:
+        while True:
+            text = path.read_text() if path.exists() else ""
+            state = render.state_from(text)
+            lines = render.render_card(state, color)
+            block = "\n".join(lines)
+            if block != last_render:
+                if printed_lines and color:
+                    # Redraw in place: move cursor up and clear to end of screen.
+                    sys.stdout.write(f"\033[{printed_lines}A\033[J")
+                elif printed_lines:
+                    print("---")
+                print(block)
+                sys.stdout.flush()
+                printed_lines = len(lines)
+                last_render = block
+            if state.passed is not None:
+                return 0 if state.passed else 1
+            if deadline and time.monotonic() > deadline:
+                fail("watch timed out before the run finished")
+                return 2
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        return 130
 
 
 def _cmd_doctor(args) -> int:
@@ -207,6 +267,16 @@ def build_parser() -> argparse.ArgumentParser:
     ph.add_argument("--bare", required=True)
     ph.add_argument("--work", required=True)
     ph.set_defaults(func=_cmd_hook)
+
+    pw = sub.add_parser("watch", help="render the live pipeline card from the event stream")
+    pw.add_argument("--work", default=".")
+    pw.add_argument("--once", action="store_true",
+                    help="render the current state once and exit (no follow)")
+    pw.add_argument("--interval", type=float, default=0.5,
+                    help="poll interval in seconds (default: 0.5)")
+    pw.add_argument("--timeout", type=float, default=0,
+                    help="give up after N seconds of no completion (0 = wait forever)")
+    pw.set_defaults(func=_cmd_watch)
 
     pd = sub.add_parser("doctor", help="check the environment")
     pd.set_defaults(func=_cmd_doctor)

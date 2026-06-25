@@ -75,6 +75,22 @@ greenlight run --intent "add a greeting helper"
 On pass, the branch is forwarded to your push target and a PR is opened with the
 intent and verification evidence in the body.
 
+### Watch it run
+
+The `git push greenlight` path runs the pipeline server-side (in the gate's
+post-receive hook), so there's nothing to watch in your terminal by default. Run
+`greenlight watch` in a second terminal to render the live pipeline card from the
+event stream:
+
+```sh
+greenlight watch            # idles until a run starts, then follows it live
+greenlight watch --once     # print the latest run's card and exit
+```
+
+It reads the per-repo event stream the gate publishes (or `$GREENLIGHT_EVENTS`
+if set), and exits 0/1 mirroring the run's pass/fail — handy in scripts. The pi
+extension shows the same card inline when the agent invokes the gate.
+
 ### Driving it from an agent
 
 `greenlight init` is meant to be paired with the `/greenlight` skill
@@ -175,6 +191,7 @@ src/greenlight/
   diff.py       FE/BE/mixed classification
   pipeline.py   orchestration
   events.py     structured JSONL event stream (the UI handoff contract)
+  render.py     reducer + card renderer for `greenlight watch`
   steps/        intent, lint, review, verify, pr
 
 pi/extensions/
