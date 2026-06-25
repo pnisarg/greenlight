@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "greenlight"
+version = "0.1.0"
+description = "A local git gate driven by pi: nothing ships until it gets the green light. Intent -> lint -> configurable review loop -> change-aware verify -> clean PR."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "pnisarg", email = "pnisarg26@yahoo.com" }]
+keywords = ["git", "code-review", "ci", "ai", "agents", "pi", "pre-push", "gate"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Quality Assurance",
+  "Topic :: Software Development :: Version Control :: Git",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/pnisarg/greenlight"
+Repository = "https://github.com/pnisarg/greenlight"
+Issues = "https://github.com/pnisarg/greenlight/issues"
+Changelog = "https://github.com/pnisarg/greenlight/blob/main/CHANGELOG.md"
+
+[project.scripts]
+greenlight = "greenlight.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

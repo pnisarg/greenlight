@@ -1,0 +1,236 @@
+"""greenlight CLI.
+
+Commands:
+  greenlight init [--push-target origin]   set up the gate for this repo
+  greenlight run --intent "..."            run the pipeline on the current branch
+                                           (explicit path; no push needed)
+  greenlight hook --bare ... --work ...    internal: invoked by post-receive
+  greenlight doctor                        check environment
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+
+from . import config, gate, gitx, worktree
+from .pipeline import run_pipeline
+from .util import GreenlightError, fail, info, ok, run, step, which
+
+
+def _cmd_init(args) -> int:
+    res = gate.init(args.work or ".", push_target=args.push_target)
+    print()
+    print("  Push through the gate with:")
+    print(f"    git push {gate.REMOTE_NAME} <branch>")
+    print()
+    print("  Or run the pipeline explicitly:")
+    print('    greenlight run --intent "what you set out to do"')
+    _maybe_write_default_config(res["repo_root"])
+    return 0
+
+
+def _maybe_write_default_config(root: str) -> None:
+    import os
+
+    path = os.path.join(root, config.CONFIG_NAME)
+    if os.path.exists(path):
+        return
+    with open(path, "w") as fh:
+        fh.write(_DEFAULT_CONFIG_TOML)
+    ok(f"wrote starter config {config.CONFIG_NAME}")
+
+
+def _read_intent(args) -> str | None:
+    """Resolve intent from --intent or --intent-file ('-' = stdin)."""
+    if args.intent_file:
+        if args.intent_file == "-":
+            return sys.stdin.read().strip() or None
+        with open(args.intent_file) as fh:
+            return fh.read().strip() or None
+    return args.intent
+
+
+def _cmd_run(args) -> int:
+    """Explicit-path run: validate the current committed branch in a worktree."""
+    root = gitx.main_repo_root(args.work or ".")
+    cfg = config.load(root)
+    branch = gitx.current_branch(root)
+    default_branch = gitx.default_branch(root, cfg.push_target)
+    if branch == default_branch:
+        raise GreenlightError(
+            f"refusing to run on default branch '{branch}'; switch to a feature branch"
+        )
+    head = gitx.rev_parse(root, "HEAD")
+    if not head:
+        raise GreenlightError("no commits on this branch")
+    base = gitx.merge_base(root, "HEAD", f"{cfg.push_target}/{default_branch}") or ""
+
+    rid = gate._repo_id(root)
+    bare = gate.bare_path(rid)
+    if not (bare / "HEAD").exists():
+        raise GreenlightError("gate not initialized; run `greenlight init` first")
+
+    # Make the branch tip available in the bare repo, then validate it there.
+    run(["git", "push", "--force", gate.REMOTE_NAME, f"HEAD:refs/heads/{branch}"],
+        cwd=root)
+    # The push itself triggers the hook; but for the explicit path we run inline
+    # against a fresh worktree so output is synchronous and unambiguous.
+    with worktree.checkout(bare, branch, head) as wt:
+        passed = run_pipeline(wt, cfg, branch, base, default_branch, _read_intent(args))
+    if passed:
+        _forward(root, cfg, branch)
+        return 0
+    fail("pipeline did not pass; nothing forwarded")
+    return 1
+
+
+def _forward(root: str, cfg: config.Config, branch: str) -> None:
+    step(f"forwarding {branch} -> {cfg.push_target}")
+    r = run(["git", "push", cfg.push_target, f"refs/heads/{branch}:refs/heads/{branch}"],
+            cwd=root)
+    if r.ok:
+        ok(f"pushed to {cfg.push_target}")
+    else:
+        fail(f"forward failed: {r.err.strip()[:300]}")
+
+
+def _cmd_hook(args) -> int:
+    """Invoked by the post-receive hook inside the bare repo."""
+    refs = gate.read_pushed_refs()
+    opts = gate.parse_push_options()
+    supplied_intent = opts.get("intent")
+    # git exports GIT_DIR et al into hooks; drop them so worktree git commands
+    # honor their cwd instead of pinning to the bare repo.
+    gate.scrub_git_env()
+    root = args.work
+    cfg = config.load(root)
+    default_branch = gitx.default_branch(root, cfg.push_target)
+
+    overall = 0
+    for old_sha, new_sha, refname in refs:
+        if not refname.startswith("refs/heads/"):
+            continue
+        branch = refname[len("refs/heads/") :]
+        if gitx.is_zero_sha(new_sha):
+            continue  # branch deletion
+        step(f"greenlight: validating {branch}")
+        # Resolve base against the user's repo (which tracks origin/<default>),
+        # since the throwaway worktree won't have those remote refs.
+        base = _resolve_base_in_root(root, new_sha, default_branch, cfg.push_target)
+        with worktree.checkout(args.bare, branch, new_sha) as wt:
+            passed = run_pipeline(wt, cfg, branch, base, default_branch, supplied_intent)
+        if passed:
+            _forward(root, cfg, branch)
+        else:
+            fail(f"{branch} did not pass the gate; not forwarded")
+            overall = 1
+    return overall
+
+
+def _resolve_base_in_root(root: str, head_sha: str, default_branch: str, push_target: str) -> str:
+    for ref in (f"{push_target}/{default_branch}", default_branch):
+        mb = gitx.merge_base(root, head_sha, ref)
+        if mb:
+            return mb
+    return gitx.EMPTY_TREE
+
+
+def _cmd_doctor(args) -> int:
+    step("greenlight doctor")
+    okk = True
+    for tool, required in (("git", True), ("pi", True), ("gh", False)):
+        path = which(tool)
+        if path:
+            ok(f"{tool}: {path}")
+        elif required:
+            fail(f"{tool}: MISSING (required)")
+            okk = False
+        else:
+            info(f"{tool}: not found (optional — PR creation disabled)")
+    return 0 if okk else 1
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="greenlight", description="Local git gate driven by pi.")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    pi = sub.add_parser("init", help="set up the gate for this repo")
+    pi.add_argument("--work", default=".", help="repo working dir (default: .)")
+    pi.add_argument("--push-target", default="origin", help="remote to forward to on pass")
+    pi.set_defaults(func=_cmd_init)
+
+    pr = sub.add_parser("run", help="run the pipeline on the current branch")
+    pr.add_argument("--work", default=".")
+    pr.add_argument("--intent", default=None,
+                    help="what you set out to accomplish (the agent that made the change should author this)")
+    pr.add_argument("--intent-file", default=None,
+                    help="read intent from a file, or '-' for stdin (use for multi-paragraph intent)")
+    pr.set_defaults(func=_cmd_run)
+
+    ph = sub.add_parser("hook", help=argparse.SUPPRESS)
+    ph.add_argument("--bare", required=True)
+    ph.add_argument("--work", required=True)
+    ph.set_defaults(func=_cmd_hook)
+
+    pd = sub.add_parser("doctor", help="check the environment")
+    pd.set_defaults(func=_cmd_doctor)
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        return args.func(args)
+    except GreenlightError as e:
+        fail(str(e))
+        return 2
+    except KeyboardInterrupt:
+        fail("interrupted")
+        return 130
+
+
+_DEFAULT_CONFIG_TOML = """# greenlight configuration. See README for all options.
+
+[greenlight]
+max_review_rounds = 3
+push_target = "origin"
+# model = "anthropic/claude-sonnet-4"   # pi model; empty = pi default
+evidence_dir = ".greenlight/evidence"
+
+[checks]
+# format_cmd = "ruff format ."
+# lint_cmd = "ruff check ."
+
+# Reviewers define what you care about. Each runs as an independent read-only
+# agent. Add your own (e.g. a brutal-code-review skill) or focus prompts.
+[[reviewers]]
+name = "brutal"
+focus = "Brutally honest senior review. Real bugs, broken edge cases, race conditions, bad error handling, needless complexity. No style nits."
+blocking_severity = "warning"
+
+[[reviewers]]
+name = "security"
+focus = "Security review: injection, auth gaps, secret leakage, unsafe deserialization, SSRF, path traversal, missing validation."
+blocking_severity = "warning"
+
+# [[reviewers]]
+# name = "house-style"
+# skill = "/path/to/your/review-skill"   # load a pi skill instead of a prompt
+
+[verify]
+# Backend test commands (auto-detected if omitted).
+# [[verify.backend]]
+# name = "unit"
+# cmd = "uv run pytest -q"
+
+# Frontend screenshot capture.
+[verify.frontend]
+url = "http://localhost:3000"
+# server_cmd = "npm run dev"
+ready_path = "/"
+
+[routing]
+# Override which paths count as frontend/backend if the defaults don't fit.
+# frontend = ["*.tsx", "frontend/*"]
+# backend = ["*.py", "backend/*"]
+"""
