@@ -20,7 +20,7 @@ remote once every gate is green.
         clean PR on your real remote
 ```
 
-It's built small and opinionated — ~1.6k lines of stdlib Python, driven by
+It's built small and opinionated — ~2.2k lines of stdlib Python, driven by
 [`pi`](https://pi.dev) — around two ideas:
 
 1. **A real review loop you configure.** Multiple reviewers (brutal code review,
@@ -183,7 +183,7 @@ python -m pytest -q
 
 ```
 src/greenlight/
-  cli.py        init | run | hook | doctor
+  cli.py        init | run | watch | hook | doctor
   gate.py       bare repo + greenlight remote + post-receive hook
   worktree.py   throwaway worktree per run
   agent.py      pi -p --mode json runner + output parsing
@@ -192,6 +192,8 @@ src/greenlight/
   pipeline.py   orchestration
   events.py     structured JSONL event stream (the UI handoff contract)
   render.py     reducer + card renderer for `greenlight watch`
+  gitx.py       git command helpers
+  util.py       process runner, logging, state paths
   steps/        intent, lint, review, verify, pr
 
 pi/extensions/
