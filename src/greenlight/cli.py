@@ -86,30 +86,34 @@ def _cmd_run(args) -> int:
     if not fetched.ok:
         raise GreenlightError(f"could not stage branch into gate: {fetched.err.strip()[:300]}")
 
+    def forward() -> bool:
+        return _forward(bare, cfg.push_target, branch)
+
     with worktree.checkout(bare, branch, head) as wt:
-        passed = run_pipeline(wt, cfg, branch, base, default_branch, _read_intent(args))
+        passed = run_pipeline(wt, cfg, branch, base, default_branch, _read_intent(args), forward)
     if passed:
-        _forward(bare, cfg.push_target, branch)
         _sync_local_branch(root, bare, branch)
         return 0
     fail("pipeline did not pass; nothing forwarded")
     return 1
 
 
-def _forward(bare: str, push_target: str, branch: str) -> None:
+def _forward(bare: str, push_target: str, branch: str) -> bool:
     """Forward the validated branch from the bare gate repo to the real remote.
 
     The pipeline's fix commits live on the bare repo's branch ref (the worktree
     was created off the bare repo), so forwarding must originate there — the
     bare repo's `origin` remote points at the configured push target's URL.
+    Returns True on a successful push.
     """
     step(f"forwarding {branch} -> {push_target}")
     r = run(["git", "push", "origin", f"refs/heads/{branch}:refs/heads/{branch}"],
             cwd=bare)
     if r.ok:
         ok(f"pushed to {push_target}")
-    else:
-        fail(f"forward failed: {r.err.strip()[:300]}")
+        return True
+    fail(f"forward failed: {r.err.strip()[:300]}")
+    return False
 
 
 def _sync_local_branch(root: str, bare: str, branch: str) -> None:
@@ -163,10 +167,12 @@ def _cmd_hook(args) -> int:
         # Resolve base against the user's repo (which tracks origin/<default>),
         # since the throwaway worktree won't have those remote refs.
         base = _resolve_base_in_root(root, new_sha, default_branch, cfg.push_target)
+        def forward(b=branch) -> bool:
+            return _forward(args.bare, cfg.push_target, b)
+
         with worktree.checkout(args.bare, branch, new_sha) as wt:
-            passed = run_pipeline(wt, cfg, branch, base, default_branch, supplied_intent)
+            passed = run_pipeline(wt, cfg, branch, base, default_branch, supplied_intent, forward)
         if passed:
-            _forward(args.bare, cfg.push_target, branch)
             _sync_local_branch(root, args.bare, branch)
         else:
             fail(f"{branch} did not pass the gate; not forwarded")
