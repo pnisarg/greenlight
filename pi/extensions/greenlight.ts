@@ -15,7 +15,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
+import { keyHint, type ExtensionAPI, type Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
@@ -25,8 +25,15 @@ import {
 	type Painter,
 	type PipelineState,
 	renderCard,
+	statusLine,
 	summarize,
 } from "./pipeline-state";
+
+// Braille spinner; frame chosen from wall-clock so it animates across renders.
+const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+function spinnerFrame(): string {
+	return SPINNER[Math.floor(Date.now() / 80) % SPINNER.length];
+}
 
 const PARAMS = Type.Object({
 	intent: Type.String({
@@ -59,8 +66,9 @@ function painterFor(theme: Theme): Painter {
 export default function greenlightExtension(pi: ExtensionAPI) {
 	// Last pipeline state per tool call, so renderResult can keep showing the
 	// card even when execute() throws on a gate failure (a thrown error result
-	// carries no details.state).
-	const finalStates = new Map<string, PipelineState>();
+	// carries no details.state). `done` marks the run finished so renderResult
+	// stops animating the spinner / annotating live elapsed.
+	const finalStates = new Map<string, { state: PipelineState; done: boolean }>();
 
 	pi.registerTool({
 		name: "greenlight_run",
@@ -77,8 +85,17 @@ export default function greenlightExtension(pi: ExtensionAPI) {
 			const eventsDir = mkdtempSync(join(tmpdir(), "greenlight-events-"));
 			const eventsFile = join(eventsDir, "events.jsonl");
 			const state = initialState();
+			finalStates.set(toolCallId, { state, done: false });
+			const statusKey = `greenlight:${toolCallId}`;
 
 			let lastSize = 0;
+			const push = () => {
+				onUpdate?.({
+					content: [{ type: "text", text: summarize(state) }],
+					details: { state },
+				});
+				if (ctx.hasUI) ctx.ui.setStatus(statusKey, statusLine(state, painterFor(ctx.ui.theme)));
+			};
 			const drain = () => {
 				let size = 0;
 				try {
@@ -99,10 +116,7 @@ export default function greenlightExtension(pi: ExtensionAPI) {
 				applyLines(fresh, text);
 				Object.assign(state, fresh);
 				lastSize = size;
-				onUpdate?.({
-					content: [{ type: "text", text: summarize(state) }],
-					details: { state },
-				});
+				push();
 			};
 
 			const child = spawn("greenlight", ["run", "--intent-file", "-"], {
@@ -122,6 +136,11 @@ export default function greenlightExtension(pi: ExtensionAPI) {
 			child.stdout.on("data", () => {});
 
 			const poll = setInterval(drain, 250);
+			// Tick the spinner even when no new events arrive, so a long-running
+			// stage visibly animates instead of looking hung.
+			const tick = setInterval(() => {
+				if (state.passed == null) push();
+			}, 120);
 			const onAbort = () => child.kill("SIGTERM");
 			signal?.addEventListener("abort", onAbort, { once: true });
 
@@ -131,10 +150,12 @@ export default function greenlightExtension(pi: ExtensionAPI) {
 			});
 
 			clearInterval(poll);
+			clearInterval(tick);
 			signal?.removeEventListener("abort", onAbort);
 			drain(); // final flush
 			rmSync(eventsDir, { recursive: true, force: true });
-			finalStates.set(toolCallId, state);
+			finalStates.set(toolCallId, { state, done: true });
+			if (ctx.hasUI) ctx.ui.setStatus(statusKey, undefined);
 
 			const passed = state.passed === true && code === 0;
 			let text = summarize(state);
@@ -168,10 +189,10 @@ export default function greenlightExtension(pi: ExtensionAPI) {
 			return new Text(s, 0, 0);
 		},
 
-		renderResult(result, _opts, theme, context) {
+		renderResult(result, opts, theme, context) {
+			const tracked = finalStates.get(context.toolCallId);
 			const state =
-				(result.details as { state?: PipelineState } | undefined)?.state ??
-				finalStates.get(context.toolCallId);
+				(result.details as { state?: PipelineState } | undefined)?.state ?? tracked?.state;
 			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
 			if (!state) {
 				// Fallback before any event arrived (or non-state error result).
@@ -179,7 +200,23 @@ export default function greenlightExtension(pi: ExtensionAPI) {
 				text.setText(theme.fg("dim", raw && raw.type === "text" ? raw.text : "greenlight…"));
 				return text;
 			}
-			text.setText(renderCard(state, painterFor(theme)).join("\n"));
+			const running = state.passed == null && !tracked?.done;
+			// While running, elapsed ticks against wall clock; once done, freeze it to
+			// the last event so finished stages don't keep growing on every redraw.
+			const now = running ? Math.floor(Date.now() / 1000) : Math.ceil(state.lastTs);
+			const lines = renderCard(state, painterFor(theme), {
+				now,
+				spinner: running ? spinnerFrame() : undefined,
+				expanded: opts.expanded,
+			});
+			// Hint that findings can be expanded, once review has any.
+			const hasFindings = state.review.reviewers.some((r) => r.items.length > 0);
+			if (hasFindings && !opts.expanded) {
+				lines.push(theme.fg("dim", keyHint("app.tools.expand", "to show findings")));
+			}
+			// Spinner animation is driven by the execute() tick (onUpdate); no
+			// self-invalidate here, which would busy-loop the renderer.
+			text.setText(lines.join("\n"));
 			return text;
 		},
 	});
