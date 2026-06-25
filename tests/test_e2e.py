@@ -74,3 +74,25 @@ def test_push_through_gate_forwards_clean_change(env):
     # The hook runs the pipeline; on pass it forwards to origin.
     assert res.returncode == 0, res.stderr
     assert _origin_has_branch(origin, "feat/add-greeting"), res.stderr
+
+
+def test_greenlight_run_forwards_clean_change(env):
+    """The explicit `greenlight run` path validates in a worktree off the bare
+    repo and forwards the result to origin (regression: it must run the pipeline
+    once and forward from the bare repo, not the root)."""
+    from greenlight import gate
+
+    tmp_path, work, origin = env
+    gate.init(str(work))
+
+    _git(["checkout", "-b", "feat/run-path"], work)
+    (work / "mod.py").write_text("def add(a, b):\n    return a + b\n")
+    _git(["add", "-A"], work)
+    _git(["commit", "-m", "feat: add module"], work)
+
+    res = subprocess.run(
+        ["python", "-m", "greenlight", "run", "--intent", "Add an add() helper"],
+        cwd=work, capture_output=True, text=True,
+    )
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert _origin_has_branch(origin, "feat/run-path"), res.stdout + res.stderr
