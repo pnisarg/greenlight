@@ -95,6 +95,11 @@ def _handle():
         print(f"   (events disabled: {e})", file=sys.stderr)
         _sink = False
         return None
+    # This process now owns the stream via the open handle, so drop the env var:
+    # otherwise child subprocesses (lint/verify, agent `pi` calls, and any nested
+    # `greenlight run` they spawn) would inherit it and append their own events
+    # into our file, corrupting the stream a UI is reading.
+    os.environ.pop("GREENLIGHT_EVENTS", None)
     return _sink
 
 

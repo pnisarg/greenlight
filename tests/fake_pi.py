@@ -9,7 +9,6 @@ Read-only review invocations include "--tools" before the prompt; we just look
 at the prompt text to decide what to emit.
 """
 import json
-import os
 import sys
 
 

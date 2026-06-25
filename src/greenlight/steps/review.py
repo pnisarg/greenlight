@@ -12,7 +12,6 @@ intent stable.
 """
 from __future__ import annotations
 
-import json
 
 from .. import events
 from ..agent import Agent

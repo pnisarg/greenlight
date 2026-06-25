@@ -15,7 +15,7 @@ from .steps import pr as pr_step
 from .steps import review as review_step
 from .steps import verify as verify_step
 from .steps.types import StepResult
-from .util import fail, info, ok, run, step
+from .util import fail, info, ok, run
 
 
 def _committer(work_dir: str):
@@ -52,7 +52,13 @@ def run_pipeline(
     base_sha: str,
     default_branch: str,
     supplied_intent: str | None,
+    forward=None,
 ) -> bool:
+    """Run the gate. `forward`, if given, is a no-arg callable returning bool
+    that pushes the validated branch to the real remote. It is invoked AFTER
+    verification passes and BEFORE the PR step, because opening a PR references
+    a branch that must already exist on the remote.
+    """
     agent = Agent(model=cfg.model)
     commit = _committer(work_dir)
     head = gitx.rev_parse(work_dir, "HEAD")
@@ -60,6 +66,8 @@ def run_pipeline(
     files = gitx.changed_files(work_dir, base, head)
     if not files:
         ok("no changes to validate; forwarding as-is")
+        if forward is not None and not forward():
+            return False
         return True
     cls = classify(files, cfg.routing)
     info(f"{len(files)} changed files — classified {cls.label}")
@@ -109,6 +117,13 @@ def run_pipeline(
         )
     if any(not r.passed and not r.skipped for r in verify_results):
         fail("verify gate failed")
+        events.emit("run_end", passed=False)
+        return False
+
+    # Forward to the real remote before opening the PR: `gh pr create --head`
+    # needs the branch (and its commits) to already exist on origin.
+    if forward is not None and not forward():
+        fail("forward failed; nothing shipped")
         events.emit("run_end", passed=False)
         return False
 
