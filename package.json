@@ -1,0 +1,36 @@
+{
+  "name": "greenlight-pi",
+  "version": "0.1.0",
+  "private": false,
+  "description": "pi package for greenlight: a live pipeline card (intent → lint → review loop → verify → PR) rendered when the coding agent invokes the greenlight gate, plus the /greenlight skill.",
+  "keywords": [
+    "pi-package",
+    "greenlight",
+    "code-review",
+    "ci",
+    "gate"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "test": "node --test --experimental-strip-types 'pi/extensions/**/*.test.ts'",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.0",
+    "typescript": "^5.4.0"
+  },
+  "pi": {
+    "extensions": [
+      "pi/extensions/greenlight.ts"
+    ],
+    "skills": [
+      "skill"
+    ]
+  }
+}

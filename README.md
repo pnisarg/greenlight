@@ -81,6 +81,25 @@ intent and verification evidence in the body.
 (`skill/SKILL.md`). Point your agent at it; it runs the pipeline, reports which
 gate passed/failed, and (task-first mode) does the work before validating.
 
+### Live pipeline card in pi
+
+For [`pi`](https://pi.dev), the repo also ships a small package (`package.json`
++ `pi/extensions/greenlight.ts`) that adds a `greenlight_run` tool. When the
+coding agent invokes it, the tool-call card becomes a **live diagram** of the
+pipeline as it advances — intent → lint → review loop (per reviewer, per round)
+→ verify → PR — so you can watch the handoff between the agent and the gate in
+real time. The agent’s architecture is unchanged: it still authors the intent
+and hands off; the extension only renders greenlight’s event stream.
+
+```sh
+pi install ./greenlight        # installs the extension + the /greenlight skill
+```
+
+The extension is a pure renderer over a machine-readable event stream that
+greenlight emits as JSONL to `$GREENLIGHT_EVENTS` (additive; unset = no-op, so
+the gate behaves identically when nothing is watching). That stream is the
+handoff contract — any other UI can consume it the same way.
+
 ## Configure — `.greenlight.toml`
 
 ```toml
@@ -155,7 +174,13 @@ src/greenlight/
   config.py     .greenlight.toml schema, default reviewers
   diff.py       FE/BE/mixed classification
   pipeline.py   orchestration
+  events.py     structured JSONL event stream (the UI handoff contract)
   steps/        intent, lint, review, verify, pr
+
+pi/extensions/
+  pipeline-state.ts   pure reducer + card renderer over the event stream
+  greenlight.ts       greenlight_run tool: spawns the gate, tails events,
+                      streams the live card (TUI glue only)
 ```
 
 The gate hook is a tiny shim that calls back into `greenlight hook`, which holds

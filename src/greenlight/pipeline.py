@@ -5,7 +5,7 @@ passes; the gate forwards the branch to the push target on True.
 """
 from __future__ import annotations
 
-from . import gitx
+from . import events, gitx
 from .agent import Agent
 from .config import Config
 from .diff import classify
@@ -63,16 +63,28 @@ def run_pipeline(
         return True
     cls = classify(files, cfg.routing)
     info(f"{len(files)} changed files — classified {cls.label}")
+    events.emit("run_start", branch=branch, classification=cls.label, files=files)
 
     intent = intent_step.capture(agent, work_dir, base, head, supplied_intent)
     info(f"intent: {intent[:200]}")
+    events.emit(
+        "intent",
+        source="supplied" if supplied_intent and supplied_intent.strip() else "reconstructed",
+        text=intent,
+    )
 
     results: list[StepResult] = []
 
     lint_res = lint_step.run_step(agent, work_dir, cfg)
     results.append(lint_res)
+    events.emit(
+        "lint",
+        status="skip" if lint_res.skipped else ("pass" if lint_res.passed else "fail"),
+        fixed="fixed by agent" in lint_res.summary,
+    )
     if not lint_res.passed:
         fail("lint gate failed")
+        events.emit("run_end", passed=False)
         return False
     head = gitx.rev_parse(work_dir, "HEAD")  # lint may have committed fixes
 
@@ -81,20 +93,38 @@ def run_pipeline(
     if not review_res.passed:
         fail("review gate failed")
         _print_findings(review_res)
+        events.emit("run_end", passed=False)
         return False
     head = gitx.rev_parse(work_dir, "HEAD")  # review fixes may have committed
 
     verify_results = verify_step.run_step(agent, work_dir, cfg, cls, commit)
     results.extend(verify_results)
+    for r in verify_results:
+        target = "frontend" if "frontend" in r.name else "backend"
+        events.emit(
+            "verify",
+            target=target,
+            status="skip" if r.skipped else ("pass" if r.passed else "fail"),
+            evidence=r.evidence,
+        )
     if any(not r.passed and not r.skipped for r in verify_results):
         fail("verify gate failed")
+        events.emit("run_end", passed=False)
         return False
 
     pr_res = pr_step.run_step(work_dir, cfg, branch, intent, results, default_branch)
     results.append(pr_res)
+    events.emit("pr", status=_pr_status(pr_res), url=pr_res.summary)
 
     ok("all gates green")
+    events.emit("run_end", passed=True)
     return True
+
+
+def _pr_status(res: StepResult) -> str:
+    if res.skipped:
+        return "skip"
+    return "open" if res.passed else "fail"
 
 
 def _print_findings(res: StepResult) -> None:

@@ -14,6 +14,18 @@ You drive it through the `greenlight` CLI. Output goes to stderr as readable
 `=> step` / ` ok ` / ` !! ` / ` xx ` lines; the exit code is the source of truth
 (0 = passed, non-zero = failed).
 
+## Prefer the `greenlight_run` tool when it exists
+
+If the `greenlight_run` tool is available (the greenlight pi package is
+installed), call it instead of shelling out to the CLI. It runs the same
+pipeline but renders a **live pipeline card** (intent → lint → review loop →
+verify → PR) as it progresses, so the user sees the handoff between you and the
+gate in real time. Pass your authored intent as the `intent` argument. The work
+must already be committed on a feature branch. Everything below about authoring
+intent, the review loop, and reporting still applies — the tool just replaces
+the `greenlight run` invocation and visualizes it. Fall back to the CLI only
+when the tool is not registered.
+
 ## You are the source of intent
 
 greenlight's review loop is only as good as the intent it's given. The agent
