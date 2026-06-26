@@ -19,7 +19,7 @@ from pathlib import Path
 
 from . import __version__, config, events, gate, gitx, render, worktree
 from .pipeline import run_pipeline
-from .util import GreenlightError, fail, info, ok, run, step, which
+from .util import GreenlightError, fail, info, ok, run, step, warn, which
 
 
 def _cmd_init(args) -> int:
@@ -261,13 +261,21 @@ def _cmd_gc(args) -> int:
         info("no gate repos to gc")
         return 0
     reclaimed = 0
+    failed = 0
     for bare in bares:
         step(f"gc {bare.name}")
-        before, after = gate.gc_bare(bare)
+        try:
+            before, after = gate.gc_bare(bare)
+        except GreenlightError as exc:
+            failed += 1
+            warn(f"skipped {bare.name}: {exc}")
+            continue
         reclaimed += max(before - after, 0)
         ok(f"{_human_bytes(before)} -> {_human_bytes(after)}")
-    ok(f"reclaimed {_human_bytes(reclaimed)} across {len(bares)} repo(s)")
-    return 0
+    ok(f"reclaimed {_human_bytes(reclaimed)} across {len(bares) - failed} repo(s)")
+    if failed:
+        warn(f"{failed} repo(s) failed to gc")
+    return 1 if failed else 0
 
 
 def _cmd_doctor(args) -> int:
