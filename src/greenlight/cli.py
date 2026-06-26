@@ -429,6 +429,16 @@ def _install_termination_handlers() -> None:
     (and subprocess.run kills its child agent on the way out).
     """
     def _raise(signum, _frame):
+        # Reset both handlers to default immediately so a second signal (e.g. a
+        # harness escalating SIGTERM->SIGKILL, or SIGHUP+SIGTERM on close)
+        # delivered while the worktree teardown's `finally` is running can't
+        # raise again and abort cleanup partway — which would re-strand the very
+        # worktree this unwinding is meant to remove. One clean interrupt only.
+        for s in (signal.SIGTERM, signal.SIGHUP):
+            try:
+                signal.signal(s, signal.SIG_DFL)
+            except (ValueError, OSError):
+                pass
         raise KeyboardInterrupt
 
     for sig in (signal.SIGTERM, signal.SIGHUP):

@@ -178,18 +178,19 @@ export default function greenlightExtension(pi: ExtensionAPI) {
 			clearInterval(tick);
 			signal?.removeEventListener("abort", onAbort);
 			drain(); // final flush
-			rmSync(eventsDir, { recursive: true, force: true });
-			finalStates.set(toolCallId, { state, done: true });
-			if (ctx.hasUI) ctx.ui.setStatus(statusKey, undefined);
 
 			const passed = state.passed === true && code === 0;
 			let text = summarize(state);
 			if (state.passed == null) {
 				// Pipeline died before run_end — surface the tail of stderr so the
-				// agent can act, rather than a bare exit code.
+				// agent can act, rather than a bare exit code. Read it BEFORE rmSync
+				// below deletes the dir that holds stderr.log.
 				const tail = readStderrTail(8);
 				text = `greenlight: did not complete (exit ${code}).\n${tail}`;
 			}
+			rmSync(eventsDir, { recursive: true, force: true });
+			finalStates.set(toolCallId, { state, done: true });
+			if (ctx.hasUI) ctx.ui.setStatus(statusKey, undefined);
 
 			if (!passed) {
 				// Mark the tool result as an error so the agent treats it as a gate

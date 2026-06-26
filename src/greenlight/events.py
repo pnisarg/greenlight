@@ -99,10 +99,13 @@ def _archive(path: Path) -> None:
         hist = path.parent / "history"
         hist.mkdir(parents=True, exist_ok=True)
         ts = time.strftime("%Y%m%d-%H%M%S", time.localtime())
-        dest = hist / f"{ts}.jsonl"
+        # Zero-pad the same-second disambiguator so lexical order == chronological
+        # order: "<ts>-00" sorts after "<ts>" only if we always suffix. Use a
+        # suffix on every file so the comparison is uniform.
+        dest = hist / f"{ts}-00.jsonl"
         i = 1
         while dest.exists():  # two runs in the same second
-            dest = hist / f"{ts}-{i}.jsonl"
+            dest = hist / f"{ts}-{i:02d}.jsonl"
             i += 1
         dest.write_text(path.read_text())
         stale = sorted(hist.glob("*.jsonl"))[:-_HISTORY_KEEP]

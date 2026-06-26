@@ -11,6 +11,7 @@ Kept free of any I/O so it can be unit-tested with plain dicts.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 
 STAGE_ORDER = ("intent", "lint", "review", "verify", "pr")
@@ -303,13 +304,27 @@ def _report_header(events: list[dict]) -> str:
 def _finding_row(it: dict, color: bool) -> str:
     sev = str(it.get("severity", "warning")).lower()
     glyph = _SEV_GLYPH.get(sev, "·")
-    file = str(it.get("file", ""))
+    file = _sanitize(str(it.get("file", "")))
     line = it.get("line")
     loc = file + (f":{line}" if isinstance(line, int) else "")
-    desc = str(it.get("description", "")).strip()
+    desc = _sanitize(str(it.get("description", "")).strip())
     blocks = " [blocking]" if it.get("blocks") else ""
     code = _RED if sev == "error" else (_DIM if sev == "info" else _CYAN)
     return _c(f"      {glyph} {loc}{blocks} — {desc}", code, color)
+
+
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+
+
+def _sanitize(s: str) -> str:
+    """Strip control/escape chars from reviewer-supplied text before printing.
+
+    Findings are LLM output influenced by the diff under review, persisted to
+    the history log and re-emitted by `greenlight review-log`. A crafted finding
+    could embed ANSI escapes; drop control chars (incl. ESC) so they render
+    inert. Tabs/newlines collapse to a space to keep each finding on one row.
+    """
+    return _CONTROL.sub("", s.replace("\t", " ").replace("\n", " "))
 
 
 def _verdict(events: list[dict]):

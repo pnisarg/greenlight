@@ -73,6 +73,26 @@ def test_report_empty_stream():
     assert "no review activity" in "\n".join(render.render_review_log("", color=False))
 
 
+def test_report_strips_ansi_from_untrusted_findings():
+    """Findings are LLM output influenced by the diff; a crafted description with
+    escape sequences must not be rendered raw to the terminal."""
+    from greenlight import render
+
+    text = _events(
+        {"type": "run_start", "branch": "feat/x", "classification": "backend", "files": ["a.py"]},
+        {"type": "review_round", "round": 1, "max_rounds": 3},
+        {"type": "reviewer", "name": "brutal", "round": 1, "findings": 1, "blocking": 0, "items": [
+            {"severity": "info", "file": "a.py", "line": 1,
+             "description": "evil\x1b[31mRED\x1b[0m\nsecond line\x07", "blocks": False},
+        ]},
+        {"type": "run_end", "passed": True},
+    )
+    out = "\n".join(render.render_review_log(text, color=False))
+    assert "\x1b" not in out  # ESC stripped
+    assert "\x07" not in out  # BEL stripped
+    assert "evil[31mRED[0m second line" in out  # text preserved, newline -> space
+
+
 @pytest.fixture(autouse=True)
 def _reset_sink():
     events._sink = None
@@ -126,6 +146,30 @@ def test_archive_retention_caps_history(monkeypatch, tmp_path):
 
     archived = list(events.history_dir(repo).glob("*.jsonl"))
     assert len(archived) == 3  # capped; live events.jsonl holds the 6th run
+
+
+def test_same_second_archives_sort_chronologically(monkeypatch, tmp_path):
+    """Same-second archive names must sort lexically == chronologically, so
+    newest-first ordering and prune target the right files."""
+    monkeypatch.setattr("greenlight.util.state_dir", lambda: tmp_path / "state")
+    monkeypatch.setattr("greenlight.events.time.strftime", lambda *a, **k: "20260101-120000")
+    monkeypatch.delenv("GREENLIGHT_EVENTS", raising=False)
+    repo = str(tmp_path / "repo")
+
+    for i in range(3):  # three runs that all "happen" in the same second
+        events.enable_default(repo)
+        events.emit("run_start", branch=f"feat/{i}")
+        events.emit("run_end", passed=True)
+        events._sink.close()
+        events._sink = None
+
+    names = sorted(p.name for p in events.history_dir(repo).glob("*.jsonl"))
+    # All suffixed and zero-padded, so lexical sort is chronological.
+    assert names == ["20260101-120000-00.jsonl", "20260101-120000-01.jsonl"]
+    # run_logs returns newest-first: live stream (feat/2), then -01 (feat/1).
+    logs = events.run_logs(repo)
+    assert "feat/2" in logs[0].read_text()
+    assert "feat/1" in logs[1].read_text()
 
 
 def _init_repo(tmp_path):
