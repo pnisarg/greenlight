@@ -37,6 +37,14 @@ def bare_path(repo_id: str) -> Path:
     return repos_dir() / f"{repo_id}.git"
 
 
+def list_bare_repos() -> list[Path]:
+    """All provisioned bare gate repos under the state dir."""
+    d = repos_dir()
+    if not d.is_dir():
+        return []
+    return sorted(p for p in d.glob("*.git") if (p / "HEAD").exists())
+
+
 def init(work_dir: str, push_target: str = "origin") -> dict:
     """Create or repair the gate for the repo at work_dir. Idempotent."""
     root = gitx.main_repo_root(work_dir)
@@ -68,6 +76,33 @@ def _repo_id(root: str) -> str:
     from .util import repo_id
 
     return repo_id(root)
+
+
+def _dir_size(path: Path) -> int:
+    """On-disk size in bytes, counting allocated blocks like `du`.
+
+    Block accounting (not st_size) is what makes gc's win visible: thousands of
+    tiny loose refs each pin a full disk block, so packing them reclaims far
+    more on disk than their content bytes suggest.
+    """
+    total = 0
+    for p in path.rglob("*"):
+        try:
+            st = p.stat()
+            blocks = getattr(st, "st_blocks", None)
+            total += blocks * 512 if blocks is not None else st.st_size
+        except OSError:
+            continue
+    return total
+
+
+def gc_bare(bare: Path) -> tuple[int, int]:
+    """Repack/prune one bare gate repo. Returns (bytes_before, bytes_after)."""
+    before = _dir_size(bare)
+    # Prune dangling worktree admin entries first so their refs don't pin objects.
+    run(["git", "worktree", "prune"], cwd=bare)
+    run(["git", "gc", "--prune=now"], cwd=bare, check=True)
+    return before, _dir_size(bare)
 
 
 def _provision_bare(bare: Path, origin: str) -> None:

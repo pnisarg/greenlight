@@ -91,6 +91,24 @@ It reads the per-repo event stream the gate publishes (or `$GREENLIGHT_EVENTS`
 if set), and exits 0/1 mirroring the run's pass/fail — handy in scripts. The pi
 extension shows the same card inline when the agent invokes the gate.
 
+### Disk hygiene
+
+Each run checks out into a **throwaway** worktree that is removed when the run
+ends (pass or fail), so per-branch worktrees never accumulate. If a run is
+hard-killed (SIGKILL/OOM) before its cleanup runs, the next run sweeps any
+orphaned `greenlight-wt-*` temp dirs and prunes their git admin entries — the
+gate self-heals without a daemon.
+
+The longer-lived disk cost is the per-repo bare gate repo under
+`~/.greenlight/repos/<id>.git` (a mirror of the upstream, created once at
+`greenlight init`). Its object store grows as you push branches through the
+gate. Repack it on demand:
+
+```sh
+greenlight gc          # gc the gate repo for the current repo
+greenlight gc --all    # gc every provisioned gate repo
+```
+
 ### Driving it from an agent
 
 `greenlight init` is meant to be paired with the `/greenlight` skill
@@ -183,9 +201,9 @@ python -m pytest -q
 
 ```
 src/greenlight/
-  cli.py        init | run | watch | hook | doctor
-  gate.py       bare repo + greenlight remote + post-receive hook
-  worktree.py   throwaway worktree per run
+  cli.py        init | run | watch | gc | hook | doctor
+  gate.py       bare repo + greenlight remote + post-receive hook + gc
+  worktree.py   throwaway worktree per run (+ stale-orphan sweep)
   agent.py      pi -p --mode json runner + output parsing
   config.py     .greenlight.toml schema, default reviewers
   diff.py       FE/BE/mixed classification

@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- `greenlight gc [--all]`: repack/prune the per-repo bare gate repos to reclaim
+  disk. Reports on-disk (block-level) size before/after.
+- Self-healing worktree cleanup: each run sweeps orphaned `greenlight-wt-*` temp
+  dirs left by hard-killed runs (SIGKILL/OOM) and prunes their git admin
+  entries, on top of the existing per-run teardown.
+
 ## [0.1.0] - 2026-06-24
 
 Initial experimental release.
