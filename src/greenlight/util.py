@@ -70,17 +70,29 @@ def run(
     input_text: str | None = None,
     timeout: float | None = None,
 ) -> Run:
-    """Run a command, capturing output. Never raises on non-zero unless check=True."""
-    proc = subprocess.run(
-        args,
-        cwd=str(cwd) if cwd else None,
-        env={**os.environ, **(env or {})},
-        input=input_text,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
-    r = Run(proc.returncode, proc.stdout, proc.stderr)
+    """Run a command, capturing output. Never raises on non-zero unless check=True.
+
+    A timeout is turned into a normal non-zero Run (exit 124, the conventional
+    timeout code) rather than a raised TimeoutExpired: a single slow subprocess
+    (a hung reviewer agent, a stuck test command) must not crash the whole gate
+    with a traceback. check=True still surfaces it as a GreenlightError.
+    """
+    try:
+        proc = subprocess.run(
+            args,
+            cwd=str(cwd) if cwd else None,
+            env={**os.environ, **(env or {})},
+            input=input_text,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        r = Run(proc.returncode, proc.stdout, proc.stderr)
+    except subprocess.TimeoutExpired as e:
+        out = e.output if isinstance(e.output, str) else (e.output or b"").decode(errors="replace")
+        err = e.stderr if isinstance(e.stderr, str) else (e.stderr or b"").decode(errors="replace")
+        note = f"timed out after {timeout}s"
+        r = Run(124, out or "", f"{err}\n{note}".strip() if err else note)
     if check and not r.ok:
         raise GreenlightError(
             f"command failed ({r.code}): {' '.join(args)}\n{r.err.strip() or r.out.strip()}"
