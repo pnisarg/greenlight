@@ -5,6 +5,7 @@ Commands:
   greenlight run --intent "..."            run the pipeline on the current branch
                                            (explicit path; no push needed)
   greenlight watch                         render the live pipeline card
+  greenlight gc [--all]                    repack bare gate repos to reclaim disk
   greenlight hook --bare ... --work ...    internal: invoked by post-receive
   greenlight doctor                        check environment
 """
@@ -18,7 +19,7 @@ from pathlib import Path
 
 from . import __version__, config, events, gate, gitx, render, worktree
 from .pipeline import run_pipeline
-from .util import GreenlightError, fail, info, ok, run, step, which
+from .util import GreenlightError, fail, info, ok, run, step, warn, which
 
 
 def _cmd_init(args) -> int:
@@ -237,6 +238,46 @@ def _cmd_watch(args) -> int:
         return 130
 
 
+def _human_bytes(n: int) -> str:
+    size = float(n)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if size < 1024 or unit == "GiB":
+            return f"{size:.0f}{unit}" if unit == "B" else f"{size:.1f}{unit}"
+        size /= 1024
+    return f"{size:.1f}GiB"
+
+
+def _cmd_gc(args) -> int:
+    """Repack the bare gate repos to reclaim disk (objects accumulate over time)."""
+    if args.all:
+        bares = gate.list_bare_repos()
+    else:
+        root = gitx.main_repo_root(args.work or ".")
+        bare = gate.bare_path(gate._repo_id(root))
+        if not (bare / "HEAD").exists():
+            raise GreenlightError("gate not initialized here; run `greenlight init` or pass --all")
+        bares = [bare]
+    if not bares:
+        info("no gate repos to gc")
+        return 0
+    reclaimed = 0
+    failed = 0
+    for bare in bares:
+        step(f"gc {bare.name}")
+        try:
+            before, after = gate.gc_bare(bare)
+        except GreenlightError as exc:
+            failed += 1
+            warn(f"skipped {bare.name}: {exc}")
+            continue
+        reclaimed += max(before - after, 0)
+        ok(f"{_human_bytes(before)} -> {_human_bytes(after)}")
+    ok(f"reclaimed {_human_bytes(reclaimed)} across {len(bares) - failed} repo(s)")
+    if failed:
+        warn(f"{failed} repo(s) failed to gc")
+    return 1 if failed else 0
+
+
 def _cmd_doctor(args) -> int:
     step("greenlight doctor")
     info(f"greenlight: {__version__}")
@@ -285,6 +326,12 @@ def build_parser() -> argparse.ArgumentParser:
     pw.add_argument("--timeout", type=float, default=0,
                     help="give up after N seconds of no completion (0 = wait forever)")
     pw.set_defaults(func=_cmd_watch)
+
+    pg = sub.add_parser("gc", help="repack bare gate repos to reclaim disk")
+    pg.add_argument("--work", default=".")
+    pg.add_argument("--all", action="store_true",
+                    help="gc every provisioned gate repo, not just this one")
+    pg.set_defaults(func=_cmd_gc)
 
     pd = sub.add_parser("doctor", help="check the environment")
     pd.set_defaults(func=_cmd_doctor)
