@@ -97,11 +97,22 @@ def _dir_size(path: Path) -> int:
 
 
 def gc_bare(bare: Path) -> tuple[int, int]:
-    """Repack/prune one bare gate repo. Returns (bytes_before, bytes_after)."""
+    """Repack/prune one bare gate repo. Returns (bytes_before, bytes_after).
+
+    The gate is daemonless: receive-pack/fetch can be writing loose objects
+    into this bare repo concurrently (a different push, or a `greenlight run`
+    fetch) while gc runs, and that object-writing happens before our hook so we
+    can't lock it out. We therefore keep git's default prune grace period
+    (gc.pruneExpire) instead of `--prune=now`, so gc never deletes
+    just-written-but-not-yet-referenced objects and corrupts an in-flight
+    operation. The disk win comes from packing the many loose objects/refs,
+    which plain gc still does; only recent dangling objects survive to the next
+    gc.
+    """
     before = _dir_size(bare)
     # Prune dangling worktree admin entries first so their refs don't pin objects.
     run(["git", "worktree", "prune"], cwd=bare)
-    run(["git", "gc", "--prune=now"], cwd=bare, check=True)
+    run(["git", "gc"], cwd=bare, check=True)
     return before, _dir_size(bare)
 
 

@@ -7,8 +7,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
-- `greenlight gc [--all]`: repack/prune the per-repo bare gate repos to reclaim
-  disk. Reports on-disk (block-level) size before/after.
+- `greenlight gc [--all]`: repack the per-repo bare gate repos to reclaim disk.
+  Reports on-disk (block-level) size before/after. Uses git's default prune
+  grace period (not `--prune=now`) so it stays safe to run while a push/fetch is
+  writing objects into the same daemonless bare repo.
 - Self-healing worktree cleanup: each run sweeps orphaned `greenlight-wt-*` temp
   dirs left by hard-killed runs (SIGKILL/OOM) and prunes their git admin
   entries, on top of the existing per-run teardown.
