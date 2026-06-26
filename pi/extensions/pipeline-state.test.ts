@@ -189,7 +189,7 @@ test("failure card names the blocked gate and surfaces blocking findings", () =>
 	applyLines(s, FAILING);
 	assert.equal(s.failedStage, "review");
 	const lines = renderCard(s, plain);
-	assert.ok(lines.some((l) => /blocked at review/.test(l)));
+	assert.ok(lines.some((l) => /failed at review/.test(l)));
 	assert.ok(lines.some((l) => /SQL injection/.test(l)));
 });
 
@@ -197,8 +197,8 @@ test("expanded mode lists blocking findings under the reviewer", () => {
 	const s = initialState();
 	applyLines(s, FAILING);
 	const lines = renderCard(s, plain, { expanded: true });
-	// Indented finding line under the reviewer (8 spaces) appears before the verdict.
-	assert.ok(lines.some((l) => l.startsWith("        ") && /SQL injection/.test(l)));
+	// Indented finding line under the reviewer (6 spaces) appears before the verdict.
+	assert.ok(lines.some((l) => l.startsWith("      ") && /SQL injection/.test(l)));
 });
 
 test("stageElapsed bounds a stage by the next stage's start", () => {
@@ -225,11 +225,43 @@ test("renderCard shows elapsed and a custom spinner on the running stage", () =>
 			.map((e) => JSON.stringify(e))
 			.join("\n"),
 	);
-	const lines = renderCard(s, plain, { now: 18, spinner: "◐" });
-	const review = lines.find((l) => l.includes("review"));
-	assert.ok(review);
-	assert.match(review, /◐/); // spinner on the running stage
-	assert.match(review, /\(15s\)/); // 18 - 3 = 15s elapsed
+	const lines = renderCard(s, plain, { now: 18, spinner: "◐", expanded: true });
+	// The progress meter carries the spinner + active stage + total elapsed.
+	const meter = lines[1];
+	assert.match(meter, /◐/); // spinner beside the active-stage label
+	assert.match(meter, /17s/); // 18 - 1 (first stage start) = 17s total
+	// Per-stage elapsed surfaces on the running review row only when expanded.
+	const review = lines.find((l) => l.includes("review") && /\(15s\)/.test(l));
+	assert.ok(review); // 18 - 3 = 15s on the review stage
+});
+
+test("renderCard shows a progress meter with bar, active stage, and total elapsed", () => {
+	const s = initialState();
+	applyLines(
+		s,
+		[
+			{ ts: 1, type: "run_start", branch: "b", classification: "backend", files: ["a.py"] },
+			{ ts: 1, type: "intent", source: "supplied", text: "x" },
+			{ ts: 2, type: "lint", status: "pass", fixed: false },
+			{ ts: 3, type: "review_round", round: 2, max_rounds: 3 },
+			{ ts: 3, type: "reviewer", name: "brutal", round: 2, findings: null, blocking: null },
+		]
+			.map((e) => JSON.stringify(e))
+			.join("\n"),
+	);
+	const meter = renderCard(s, plain, { now: 13, spinner: "◐" })[1];
+	assert.match(meter, /[▰]/); // filled segments
+	assert.match(meter, /[▱]/); // empty segments
+	assert.match(meter, /review 2\/3/); // active stage + round
+	assert.match(meter, /12s/); // 13 - 1 = 12s total
+});
+
+test("renderCard meter fills fully and reads 'passed' on success", () => {
+	const s = initialState();
+	applyLines(s, PASSING);
+	const meter = renderCard(s, plain, { now: 11 })[1];
+	assert.ok(!meter.includes("▱")); // no empty segments left
+	assert.match(meter, /passed/);
 });
 
 test("statusLine reflects running stage, pass, and fail", () => {

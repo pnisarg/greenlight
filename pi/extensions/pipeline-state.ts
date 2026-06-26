@@ -352,49 +352,139 @@ const STAGE_LABEL: Record<StageName, string> = {
 	pr: "PR",
 };
 
+/** Pull the PR number out of a github pull URL, if present. */
+function prNumber(url: string): string {
+	const m = url.match(/\/pull\/(\d+)/);
+	return m ? m[1] : "";
+}
+
 function stageDetail(state: PipelineState, stage: StageName): string {
 	switch (stage) {
 		case "intent":
 			return state.intentSource ? `${state.intentSource} by agent` : "";
-		case "review": {
-			if (state.review.maxRounds) {
-				const fixes = state.review.fixes ? `, ${state.review.fixes} fix${state.review.fixes > 1 ? "es" : ""}` : "";
-				return `round ${state.review.round}/${state.review.maxRounds}${fixes}`;
-			}
+		case "lint": {
+			const st = state.stages.lint;
+			if (st === "done") return "clean";
+			if (st === "skip") return "skipped";
+			if (st === "fail") return "failed";
 			return "";
 		}
-		case "verify":
-			return state.verify.map((v) => `${v.target} ${v.status}`).join(", ");
-		case "pr":
-			return state.pr.url && state.pr.status !== "fail" ? state.pr.url : state.pr.status;
+		case "review": {
+			if (!state.review.maxRounds) return "";
+			const parts = [`round ${state.review.round}/${state.review.maxRounds}`];
+			const completed = state.review.reviewers.filter((r) => r.findings != null);
+			if (completed.length) {
+				const total = completed.reduce((n, r) => n + (r.findings ?? 0), 0);
+				parts.push(`${total} finding${total === 1 ? "" : "s"}`);
+			}
+			if (state.review.fixes) parts.push(`${state.review.fixes} fix${state.review.fixes > 1 ? "es" : ""}`);
+			return parts.join(" · ");
+		}
+		case "verify": {
+			if (!state.verify.length) return "";
+			if (state.verify.every((v) => v.status === "skip")) return "skipped";
+			return state.verify.map((v) => (v.status === "skip" ? `${v.target} (skipped)` : v.target)).join(", ");
+		}
+		case "pr": {
+			if (state.pr.status === "fail") return "failed";
+			if (state.pr.status === "skip") return "skipped";
+			const num = prNumber(state.pr.url);
+			if (num) return `#${num} ${state.pr.status || "opened"}`;
+			return state.pr.url || state.pr.status;
+		}
 		default:
 			return "";
 	}
 }
 
+/** Fraction of the pipeline complete: terminal stages count full, running half. */
+function progressFraction(state: PipelineState): number {
+	let done = 0;
+	for (const s of STAGE_ORDER) {
+		const st = state.stages[s];
+		if (st === "done" || st === "skip" || st === "fail") done += 1;
+		else if (st === "running") done += 0.5;
+	}
+	return done / STAGE_ORDER.length;
+}
+
+const BAR_WIDTH = 14;
+
+/** A proportional unicode meter, colored by the run's overall state. */
+function progressBar(state: PipelineState, p: Painter): string {
+	const filled = Math.round(progressFraction(state) * BAR_WIDTH);
+	const color: ColorName = state.passed === false ? "fail" : state.passed === true ? "ok" : "running";
+	return paint(p, color, "▰".repeat(filled)) + p.dim("▱".repeat(BAR_WIDTH - filled));
+}
+
+/** The headline beside the meter: the active stage, or the final verdict word. */
+function progressLabel(state: PipelineState): string {
+	if (state.passed === true) return "passed";
+	if (state.passed === false) {
+		const where = state.failedStage ?? failingStage(state);
+		return where ? `failed at ${STAGE_LABEL[where]}` : "failed";
+	}
+	let active: StageName | null = null;
+	for (const s of STAGE_ORDER) if (state.stages[s] === "running") active = s;
+	if (!active) return "starting…";
+	if (active === "review" && state.review.maxRounds) {
+		return `review ${state.review.round}/${state.review.maxRounds}`;
+	}
+	return STAGE_LABEL[active];
+}
+
+/** Wall-clock seconds from the first stage start to now (running) or last event. */
+function totalElapsed(state: PipelineState, now: number): number {
+	const starts = Object.values(state.stageStart);
+	if (!starts.length) return 0;
+	const first = Math.min(...starts);
+	const end = state.passed == null ? now : state.lastTs;
+	return Math.max(0, end - first);
+}
+
+/** Column where stage detail begins, so glyph+label form a clean gutter. */
+const LABEL_WIDTH = 8;
+
 /**
- * Render the pipeline as boxed card lines. `p` maps semantic colors to the
- * active theme (or identity for plain text). Returns an array of lines.
+ * Render the pipeline as a compact card: a header, a single progress meter
+ * (bar + active stage + total elapsed), then minimal per-stage rows. `p` maps
+ * semantic colors to the active theme (or identity for plain text). When
+ * `opts.expanded`, per-stage elapsed and blocking findings are surfaced inline.
  */
 export function renderCard(state: PipelineState, p: Painter = plain, opts: RenderOptions = {}): string[] {
 	const rows: string[] = [];
 	const now = opts.now ?? 0;
-	const header =
-		state.branch
-			? `${state.branch}  ·  ${state.classification || "?"}  ·  ${state.fileCount} file${state.fileCount === 1 ? "" : "s"}`
-			: "starting…";
-	rows.push(p.bold("greenlight ") + p.muted(header));
+
+	// Header: branch · classification · file count.
+	const header = state.branch
+		? `${state.branch}  ${p.dim("·")}  ${state.classification || "?"}  ${p.dim("·")}  ${state.fileCount} file${state.fileCount === 1 ? "" : "s"}`
+		: "starting…";
+	rows.push(p.bold(p.accent("greenlight")) + "  " + p.muted(header));
+
+	// Progress meter: bar · spinner+label · total elapsed (right of the label).
+	const running = state.passed == null;
+	const spin = running && opts.spinner ? opts.spinner + " " : "";
+	const labelColor: ColorName = state.passed === false ? "fail" : state.passed === true ? "ok" : "accent";
+	let meter = progressBar(state, p) + "  " + spin + paint(p, labelColor, progressLabel(state));
+	if (now) {
+		const total = totalElapsed(state, now);
+		if (total >= 1) meter += p.muted(`  ·  ${fmtElapsed(total)}`);
+	}
+	rows.push(meter);
+	rows.push("");
 
 	for (const stage of STAGE_ORDER) {
 		const st = state.stages[stage];
 		const glyphChar = st === "running" && opts.spinner ? opts.spinner : GLYPH[st];
 		const glyph = paint(p, COLOR[st], glyphChar);
-		const label = STAGE_LABEL[stage].padEnd(7);
-		let line = `  ${glyph} ${label}`;
 		const detail = stageDetail(state, stage);
-		if (detail) line += " " + p.dim(detail);
-		// Elapsed time on the active (or finished) stage.
-		if (now && st !== "pending") {
+		// Pad the label into a gutter only when a detail follows, so empty rows
+		// don't carry trailing whitespace (invisible but baked inside color codes).
+		const label = detail ? STAGE_LABEL[stage].padEnd(LABEL_WIDTH) : STAGE_LABEL[stage];
+		let line = `${glyph} ${st === "pending" ? p.dim(label) : label}`;
+		if (detail) line += p.dim(detail);
+		// Per-stage elapsed only when expanded — the header carries the total.
+		if (opts.expanded && now && st !== "pending") {
 			const secs = stageElapsed(state, stage, now);
 			if (secs >= 1) line += " " + p.muted(`(${fmtElapsed(secs)})`);
 		}
@@ -404,18 +494,19 @@ export function renderCard(state: PipelineState, p: Painter = plain, opts: Rende
 			for (const r of state.review.reviewers) {
 				const rGlyph = r.status === "running" && opts.spinner ? opts.spinner : GLYPH[r.status];
 				const g = paint(p, COLOR[r.status], rGlyph);
-				let sub = `      ${g} ${r.name.padEnd(10)}`;
+				let sub = `    ${g} ${r.name.padEnd(10)}`;
 				if (r.status === "done" && r.findings != null) {
-					sub += " " + p.dim(`${r.findings} finding${r.findings === 1 ? "" : "s"}, ${r.blocking} blocking`);
+					const blk = r.blocking ? p.fail(`${r.blocking} blocking`) : p.dim("0 blocking");
+					sub += " " + p.dim(`${r.findings} finding${r.findings === 1 ? "" : "s"} · `) + blk;
 				} else if (r.status === "running") {
-					sub += " " + p.dim("running…");
+					sub += " " + p.dim("reviewing…");
 				}
 				rows.push(sub);
 				// Expand-on-demand: blocking findings under the reviewer.
 				if (opts.expanded) {
 					for (const f of r.items.filter((x) => x.blocks)) {
 						const loc = f.file + (f.line != null ? `:${f.line}` : "");
-						rows.push("        " + p.fail("• ") + p.dim(`${loc} — ${f.description}`));
+						rows.push("      " + p.fail("• ") + p.dim(`${loc} — ${f.description}`));
 					}
 				}
 			}
@@ -423,9 +514,8 @@ export function renderCard(state: PipelineState, p: Painter = plain, opts: Rende
 	}
 
 	if (state.passed === false) {
-		rows.push(p.fail("● FAILED — nothing forwarded"));
-		const where = state.failedStage ?? failingStage(state);
-		if (where) rows.push("  " + p.fail(`blocked at ${STAGE_LABEL[where]}`));
+		rows.push("");
+		rows.push(p.fail("● FAILED") + p.dim(" — nothing forwarded"));
 		// Always surface blocking findings on failure, even when collapsed.
 		if (!opts.expanded) {
 			for (const f of blockingFindings(state)) {
@@ -434,7 +524,8 @@ export function renderCard(state: PipelineState, p: Painter = plain, opts: Rende
 			}
 		}
 	} else if (state.passed === true) {
-		rows.push(p.ok("● PASSED — handed back to agent"));
+		rows.push("");
+		rows.push(p.ok("● PASSED") + p.dim(" — handed back to agent"));
 	}
 	return rows;
 }
