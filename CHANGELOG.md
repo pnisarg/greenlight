@@ -7,6 +7,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- `greenlight review-log`: inspect the reviewer findings from a past run
+  (detailed per-round, per-reviewer breakdown). `--list` enumerates retained
+  runs, `--run N` selects one (newest = 1). Each run's event stream is archived
+  under `~/.greenlight/runs/<id>/history/` before the next run truncates the
+  live stream (last 25 kept), so findings stay inspectable without ever landing
+  on the branch or PR.
 - `greenlight gc [--all]`: repack the per-repo bare gate repos to reclaim disk.
   Reports on-disk (block-level) size before/after. Uses git's default prune
   grace period (not `--prune=now`) so it stays safe to run while a push/fetch is

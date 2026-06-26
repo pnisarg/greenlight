@@ -18,6 +18,11 @@ primary stream, but `enable_default()` then *also* mirrors every event to the
 per-repo path so `greenlight watch` can render extension-driven runs (it has no
 way to learn the caller's private path).
 
+The live per-repo stream is truncated at the start of each run. Before that,
+`enable_default()` archives the prior run's events to a `history/` dir so past
+runs' reviewer findings stay inspectable via `greenlight review-log` long after
+the run ends (the PR deliberately carries no findings).
+
 Event shape: {"ts": <float epoch>, "type": <str>, ...payload}. Types map 1:1 to
 the real pipeline stages:
 
@@ -46,6 +51,8 @@ from typing import Any
 _sink = None  # lazily opened append handle, or False once we've given up
 _mirror = None  # mirror handle to the per-repo default path, or None
 
+_HISTORY_KEEP = 25  # how many past runs' event logs to retain per repo
+
 
 def default_path(repo_root: str) -> Path:
     """Per-repo events file under the greenlight state dir.
@@ -56,6 +63,56 @@ def default_path(repo_root: str) -> Path:
     from .util import repo_id, state_dir
 
     return state_dir() / "runs" / repo_id(repo_root) / "events.jsonl"
+
+
+def history_dir(repo_root: str) -> Path:
+    """Where past runs' event logs are archived for `greenlight review-log`."""
+    return default_path(repo_root).parent / "history"
+
+
+def run_logs(repo_root: str) -> list[Path]:
+    """Every retained event log for this repo, newest first.
+
+    The live `events.jsonl` (the most recent run) leads, followed by archived
+    runs from `history/` in reverse-chronological order. Empty/missing files are
+    skipped so the list only contains real runs.
+    """
+    out: list[Path] = []
+    live = default_path(repo_root)
+    try:
+        if live.exists() and live.stat().st_size > 0:
+            out.append(live)
+    except OSError:
+        pass
+    hist = history_dir(repo_root)
+    if hist.exists():
+        out.extend(sorted(hist.glob("*.jsonl"), reverse=True))
+    return out
+
+
+def _archive(path: Path) -> None:
+    """Preserve the previous run's events in history/ before the live stream is
+    truncated for a new run, so its findings stay inspectable. Best-effort."""
+    try:
+        if not path.exists() or path.stat().st_size == 0:
+            return
+        hist = path.parent / "history"
+        hist.mkdir(parents=True, exist_ok=True)
+        ts = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+        dest = hist / f"{ts}.jsonl"
+        i = 1
+        while dest.exists():  # two runs in the same second
+            dest = hist / f"{ts}-{i}.jsonl"
+            i += 1
+        dest.write_text(path.read_text())
+        stale = sorted(hist.glob("*.jsonl"))[:-_HISTORY_KEEP]
+        for f in stale:
+            try:
+                f.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
 
 
 def enable_default(repo_root: str, *, truncate: bool = True) -> str:
@@ -74,11 +131,13 @@ def enable_default(repo_root: str, *, truncate: bool = True) -> str:
         # Mirror to the deterministic per-repo path too, so `greenlight watch`
         # can render this run — it can't discover the caller's private path.
         if os.path.abspath(existing) != os.path.abspath(str(p)):
+            _archive(p)  # _open_mirror truncates p; keep the prior run first
             _mirror = _open_mirror(p)
         return existing
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         if truncate:
+            _archive(p)
             p.write_text("")
     except OSError:
         return ""

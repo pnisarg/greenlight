@@ -5,6 +5,7 @@ Commands:
   greenlight run --intent "..."            run the pipeline on the current branch
                                            (explicit path; no push needed)
   greenlight watch                         render the live pipeline card
+  greenlight review-log [--list|--run N]   inspect reviewer findings from a run
   greenlight gc [--all]                    repack bare gate repos to reclaim disk
   greenlight hook --bare ... --work ...    internal: invoked by post-receive
   greenlight doctor                        check environment
@@ -238,6 +239,38 @@ def _cmd_watch(args) -> int:
         return 130
 
 
+def _cmd_review_log(args) -> int:
+    """Show the reviewer findings from a past run.
+
+    The PR deliberately carries no findings; this is the way to inspect what the
+    reviewers actually flagged. Reads the per-repo event logs greenlight
+    archives (latest run by default; `--list` enumerates retained runs and
+    `--run N` selects one, newest = 1).
+    """
+    root = gitx.main_repo_root(args.work or ".")
+    logs = events.run_logs(root)
+    color = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+    if not logs:
+        fail("no runs recorded yet for this repo")
+        return 1
+
+    if args.list:
+        step(f"{len(logs)} retained run(s) (newest first)")
+        for i, p in enumerate(logs, start=1):
+            st = render.state_from(p.read_text())
+            verdict = "?" if st.passed is None else ("pass" if st.passed else "fail")
+            info(f"{i}. {st.branch or p.stem}  [{verdict}]  {p.name}")
+        return 0
+
+    if args.run < 1 or args.run > len(logs):
+        fail(f"run {args.run} out of range (1..{len(logs)})")
+        return 1
+    chosen = logs[args.run - 1]
+    for line in render.render_review_log(chosen.read_text(), color):
+        print(line)
+    return 0
+
+
 def _human_bytes(n: int) -> str:
     size = float(n)
     for unit in ("B", "KiB", "MiB", "GiB"):
@@ -332,6 +365,14 @@ def build_parser() -> argparse.ArgumentParser:
     pg.add_argument("--all", action="store_true",
                     help="gc every provisioned gate repo, not just this one")
     pg.set_defaults(func=_cmd_gc)
+
+    prl = sub.add_parser("review-log", help="inspect reviewer findings from a past run")
+    prl.add_argument("--work", default=".")
+    prl.add_argument("--list", action="store_true",
+                     help="list retained runs (newest first) instead of showing findings")
+    prl.add_argument("--run", type=int, default=1,
+                     help="which run to show, newest = 1 (default: 1)")
+    prl.set_defaults(func=_cmd_review_log)
 
     pd = sub.add_parser("doctor", help="check the environment")
     pd.set_defaults(func=_cmd_doctor)
