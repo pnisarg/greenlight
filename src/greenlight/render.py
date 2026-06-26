@@ -54,6 +54,7 @@ class State:
     pr_status: str = ""
     pr_url: str = ""
     passed: bool | None = None
+    pid: int | None = None  # OS pid of the gate process, from run_start
     parse_errors: int = 0
 
 
@@ -102,6 +103,8 @@ def reduce(state: State, ev: dict) -> State:
         state.classification = str(ev.get("classification", ""))
         files = ev.get("files")
         state.file_count = len(files) if isinstance(files, list) else 0
+        pid = ev.get("pid")
+        state.pid = pid if isinstance(pid, int) else None
         state.stages["intent"] = "running"
     elif t == "intent":
         state.intent_source = "supplied" if ev.get("source") == "supplied" else "reconstructed"

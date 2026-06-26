@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- A run launched from the pi `greenlight_run` tool no longer dies when the pi
+  window closes: the extension spawns the gate detached (its own process group)
+  with stdio redirected to a file instead of pipes back to pi, so a parent
+  SIGHUP and the subsequent broken-pipe-on-stderr can't tear the run down
+  mid-review. The gate also installs SIGTERM/SIGHUP handlers so any termination
+  unwinds the worktree cleanup (no more orphaned `greenlight-wt-*` dirs).
+- `greenlight watch` no longer spins forever on a run that was killed before it
+  finished. `run_start` now stamps the gate PID; once the event stream is idle
+  past `--grace` (default 120s) and that PID is gone, watch reports the run
+  abandoned and exits non-zero (3) instead of polling a dead stream.
+
 ### Added
 - `greenlight review-log`: inspect the reviewer findings from a past run
   (detailed per-round, per-reviewer breakdown). `--list` enumerates retained

@@ -89,7 +89,12 @@ greenlight watch --once     # print the latest run's card and exit
 
 It reads the per-repo event stream the gate publishes (or `$GREENLIGHT_EVENTS`
 if set), and exits 0/1 mirroring the run's pass/fail — handy in scripts. The pi
-extension shows the same card inline when the agent invokes the gate.
+extension shows the same card inline when the agent invokes the gate; because
+the gate mirrors events to the per-repo stream, `greenlight watch` can also
+re-attach to a tool-launched run after its window has closed. If a run is killed
+before it finishes (so it never writes a result), watch doesn't hang on it: once
+the stream is idle past `--grace` (default 120s) and the gate process is gone,
+it reports the run abandoned and exits 3.
 
 ### Inspect what the reviewers found
 

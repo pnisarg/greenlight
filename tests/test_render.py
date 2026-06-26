@@ -42,6 +42,16 @@ def test_reduces_full_passing_run():
     assert s.parse_errors == 0
 
 
+def test_run_start_pid_is_captured():
+    s = render.state_from(json.dumps(
+        {"type": "run_start", "branch": "feat/x", "classification": "backend",
+         "files": ["a.py"], "pid": 4242}))
+    assert s.pid == 4242
+    # Absent pid (older runs) leaves it None, not 0.
+    s2 = render.state_from(json.dumps({"type": "run_start", "branch": "feat/y"}))
+    assert s2.pid is None
+
+
 def test_two_phase_reviewer_flips_running_to_done():
     s = render.State()
     render.apply_lines(s, "\n".join(json.dumps(e) for e in [
