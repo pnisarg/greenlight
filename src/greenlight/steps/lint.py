@@ -29,9 +29,14 @@ def run_step(agent: Agent, work_dir: str, cfg: Config) -> StepResult:
         info("no format/lint commands configured; skipping")
         return StepResult(name="lint", passed=True, skipped=True)
 
+    deadline = getattr(agent, "deadline", None)
+
+    def _clamp(t: float) -> float:
+        return deadline.clamp(t) if deadline is not None else t
+
     if cfg.format_cmd:
         info(f"$ {cfg.format_cmd}")
-        run(["bash", "-lc", cfg.format_cmd], cwd=work_dir, timeout=600)
+        run(["bash", "-lc", cfg.format_cmd], cwd=work_dir, timeout=_clamp(600))
         if _commit_if_dirty(work_dir, "style: apply formatter"):
             info("committed formatter changes")
 
@@ -40,7 +45,7 @@ def run_step(agent: Agent, work_dir: str, cfg: Config) -> StepResult:
         return StepResult(name="lint", passed=True)
 
     info(f"$ {cfg.lint_cmd}")
-    r = run(["bash", "-lc", cfg.lint_cmd], cwd=work_dir, timeout=600)
+    r = run(["bash", "-lc", cfg.lint_cmd], cwd=work_dir, timeout=_clamp(600))
     if r.ok:
         ok("lint clean")
         return StepResult(name="lint", passed=True)
@@ -56,7 +61,7 @@ def run_step(agent: Agent, work_dir: str, cfg: Config) -> StepResult:
     agent.run(prompt, cwd=work_dir, timeout=900)
     _commit_if_dirty(work_dir, "style: fix lint errors")
 
-    r2 = run(["bash", "-lc", cfg.lint_cmd], cwd=work_dir, timeout=600)
+    r2 = run(["bash", "-lc", cfg.lint_cmd], cwd=work_dir, timeout=_clamp(600))
     if r2.ok:
         ok("lint clean after fix")
         return StepResult(name="lint", passed=True, summary="lint fixed by agent")

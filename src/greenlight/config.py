@@ -71,6 +71,11 @@ class Config:
     evidence_dir: str
     # Max review->fix iterations before giving up.
     max_review_rounds: int
+    # Wall-clock budget for the whole run, in seconds. Clamps every agent/
+    # subprocess call to the time remaining and aborts the pipeline gracefully
+    # once exhausted, so a degraded LLM gateway can't stall a run for hours.
+    # 0 disables the cap.
+    run_timeout: int
     # The agent model passed to pi (empty = pi default).
     model: str
     push_target: str  # remote the gate forwards to on pass
@@ -115,6 +120,7 @@ def default_config() -> Config:
         lint_cmd="",
         evidence_dir=".greenlight/evidence",
         max_review_rounds=3,
+        run_timeout=1200,
         model="",
         push_target="origin",
     )
@@ -182,6 +188,7 @@ def load(repo_root: str | Path) -> Config:
     gen = data.get("greenlight", {})
     cfg.evidence_dir = str(gen.get("evidence_dir", cfg.evidence_dir))
     cfg.max_review_rounds = int(gen.get("max_review_rounds", cfg.max_review_rounds))
+    cfg.run_timeout = int(gen.get("run_timeout", cfg.run_timeout))
     cfg.model = str(gen.get("model", cfg.model))
     cfg.push_target = str(gen.get("push_target", cfg.push_target))
     return cfg

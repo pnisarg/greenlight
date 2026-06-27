@@ -7,6 +7,7 @@ PR creation failed with "No commits between main and <branch>".
 from greenlight import pipeline
 from greenlight.config import default_config
 from greenlight.steps.types import StepResult
+from greenlight.util import Deadline
 
 
 def test_forward_runs_before_pr(monkeypatch, tmp_path):
@@ -73,3 +74,31 @@ def test_forward_failure_aborts_before_pr(monkeypatch, tmp_path):
 
     assert passed is False
     assert "pr" not in calls  # PR never attempted when forward fails
+
+
+def test_exhausted_budget_aborts_before_lint(monkeypatch, tmp_path):
+    """An expired run budget stops the pipeline gracefully before the next gate,
+    instead of letting per-step timeouts stack for hours."""
+    calls: list[str] = []
+    monkeypatch.setattr(pipeline.gitx, "rev_parse", lambda *a, **k: "HEAD_SHA")
+    monkeypatch.setattr(pipeline, "_resolve_base", lambda *a, **k: "BASE_SHA")
+    monkeypatch.setattr(pipeline.gitx, "changed_files", lambda *a, **k: ["a.py"])
+    monkeypatch.setattr(pipeline.intent_step, "capture", lambda *a, **k: "intent")
+    monkeypatch.setattr(pipeline, "Agent", lambda *a, **k: object())
+
+    # An already-expired deadline: remaining() <= 0 the moment it's checked.
+    class _Expired(Deadline):
+        def expired(self):
+            return True
+
+    monkeypatch.setattr(pipeline, "Deadline", lambda _b: _Expired(1))
+    monkeypatch.setattr(pipeline.lint_step, "run_step",
+                        lambda *a, **k: calls.append("lint") or StepResult(name="lint", passed=True))
+
+    cfg = default_config()
+    cfg.run_timeout = 1  # capped
+    passed = pipeline.run_pipeline(
+        str(tmp_path), cfg, "feat/x", "BASE_SHA", "main", "intent", lambda: True,
+    )
+    assert passed is False
+    assert "lint" not in calls  # aborted before the lint gate ran

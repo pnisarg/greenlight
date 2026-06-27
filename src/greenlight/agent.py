@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from .util import GreenlightError, run, which
+from .util import Deadline, GreenlightError, run, which
 
 _FENCE = re.compile(r"```(?:json)?\s*\n(.*?)\n```", re.DOTALL)
 
@@ -81,9 +81,17 @@ def _last_assistant_text(stdout: str) -> str:
 class Agent:
     """A configured pi invocation environment."""
 
-    def __init__(self, model: str = "", extra_args: list[str] | None = None):
+    def __init__(
+        self,
+        model: str = "",
+        extra_args: list[str] | None = None,
+        deadline: Deadline | None = None,
+    ):
         self.model = model
         self.extra_args = extra_args or []
+        # Shared run budget; clamps every call so no agent invocation outlives
+        # the run's wall-clock deadline. None = uncapped (legacy behavior).
+        self.deadline = deadline
         if not which("pi"):
             raise GreenlightError("pi not found on PATH; greenlight needs pi to run")
 
@@ -108,7 +116,8 @@ class Agent:
         timeout: float = 1800,
     ) -> AgentResult:
         args = self._base(read_only, skills)
-        r = run(args + [prompt], cwd=cwd, timeout=timeout)
+        eff_timeout = self.deadline.clamp(timeout) if self.deadline else timeout
+        r = run(args + [prompt], cwd=cwd, timeout=eff_timeout)
         text = _last_assistant_text(r.out)
         if not text and not r.ok:
             raise GreenlightError(

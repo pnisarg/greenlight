@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -49,6 +50,51 @@ def fail(msg: str) -> None:
 
 class GreenlightError(Exception):
     """User-facing error that should abort the run with a clean message."""
+
+
+class Deadline:
+    """A wall-clock budget for an entire run.
+
+    The root cause of "stuck for hours": every step times out individually, so a
+    degraded LLM gateway lets intent + lint + (reviewers x rounds) + verify each
+    crawl to its own per-call ceiling, stacking to multi-hour runs. A single
+    Deadline shared across the run fixes that: `clamp()` shrinks every per-call
+    timeout to the time left, so no call outlives the budget, and `expired()`
+    lets the pipeline stop gracefully at the next gate instead of grinding on.
+
+    budget_seconds <= 0 or None disables the cap (clamp/expired become no-ops),
+    preserving the old unbounded behavior for callers that opt out.
+    """
+
+    def __init__(self, budget_seconds: float | None):
+        self._end = (
+            time.monotonic() + budget_seconds
+            if budget_seconds and budget_seconds > 0
+            else None
+        )
+
+    def remaining(self) -> float | None:
+        """Seconds left, or None when uncapped. Never negative."""
+        if self._end is None:
+            return None
+        return max(0.0, self._end - time.monotonic())
+
+    def expired(self) -> bool:
+        rem = self.remaining()
+        return rem is not None and rem <= 0
+
+    def clamp(self, timeout: float | None) -> float | None:
+        """Shrink a per-call timeout to fit the remaining budget.
+
+        Returns a small positive floor (not 0) when the budget is nearly spent,
+        so the clamped call fails fast on its own timeout rather than blocking
+        forever on a 0/None timeout.
+        """
+        rem = self.remaining()
+        if rem is None:
+            return timeout
+        floored = max(rem, 0.1)
+        return floored if timeout is None else min(timeout, floored)
 
 
 @dataclass

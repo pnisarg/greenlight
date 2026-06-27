@@ -2,6 +2,10 @@
 
 [greenlight]
 max_review_rounds = 3
+# Wall-clock budget (seconds) for the whole run. Clamps every agent/subprocess
+# call to the time left and aborts gracefully once exhausted, so a degraded LLM
+# gateway can't stall a run for hours. 0 = uncapped.
+run_timeout = 1200
 push_target = "origin"
 # model = ""   # pi default (LiteLLM gateway)
 evidence_dir = ".greenlight/evidence"

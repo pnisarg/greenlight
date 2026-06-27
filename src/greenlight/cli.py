@@ -465,6 +465,7 @@ _DEFAULT_CONFIG_TOML = """# greenlight configuration. See README for all options
 
 [greenlight]
 max_review_rounds = 3
+run_timeout = 1200   # wall-clock budget (s) for the whole run; 0 = uncapped
 push_target = "origin"
 # model = "anthropic/claude-sonnet-4"   # pi model; empty = pi default
 evidence_dir = ".greenlight/evidence"

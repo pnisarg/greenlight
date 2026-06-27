@@ -156,7 +156,16 @@ def run_step(
     step("review loop")
     all_findings: list[Finding] = []
 
+    deadline = getattr(agent, "deadline", None)
     for rnd in range(1, cfg.max_review_rounds + 1):
+        if deadline is not None and deadline.expired():
+            warn(f"run budget exhausted; stopping review after {rnd - 1} round(s)")
+            return StepResult(
+                name="review",
+                passed=False,
+                summary=f"run budget exhausted after {rnd - 1} round(s)",
+                findings=all_findings,
+            )
         info(f"round {rnd}/{cfg.max_review_rounds}")
         events.emit("review_round", round=rnd, max_rounds=cfg.max_review_rounds)
         findings = _run_reviewers(agent, work_dir, cfg, base, head, intent, rnd)

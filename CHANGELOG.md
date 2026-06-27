@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- `run_timeout` config (default 1200s): a single wall-clock budget for the whole
+  run. A shared deadline clamps every agent/subprocess call to the time
+  remaining and aborts the pipeline gracefully at the next gate once exhausted.
+  Fixes runs grinding for hours on a degraded LLM gateway, where each step
+  previously timed out individually and the per-step ceilings stacked (intent +
+  lint + reviewers x rounds + verify) to ~4.5h. `0` disables the cap.
+
 ### Fixed
 - A run launched from the pi `greenlight_run` tool no longer dies when the pi
   window closes: the extension spawns the gate detached (its own process group)

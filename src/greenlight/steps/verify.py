@@ -47,7 +47,8 @@ def _write_log(evidence_abs: Path, name: str, content: str) -> str:
     return path.name
 
 
-def _verify_backend(work_dir: str, cfg: Config, evidence_abs: Path, evidence_rel: str) -> StepResult:
+def _verify_backend(work_dir: str, cfg: Config, evidence_abs: Path, evidence_rel: str,
+                    deadline=None) -> StepResult:
     targets = cfg.verify_backend or _auto_backend_targets(work_dir)
     if not targets:
         warn("no backend test command configured or detected; skipping")
@@ -58,7 +59,8 @@ def _verify_backend(work_dir: str, cfg: Config, evidence_abs: Path, evidence_rel
     summaries: list[str] = []
     for t in targets:
         info(f"$ {t.cmd}")
-        r = run(["bash", "-lc", t.cmd], cwd=work_dir, timeout=t.timeout)
+        timeout = deadline.clamp(t.timeout) if deadline is not None else t.timeout
+        r = run(["bash", "-lc", t.cmd], cwd=work_dir, timeout=timeout)
         log = f"$ {t.cmd}\n\n{r.out}\n{r.err}"
         fname = _write_log(evidence_abs, t.name, log)
         evidence.append(f"{evidence_rel}/{fname}")
@@ -168,9 +170,10 @@ def run_step(
     evidence_abs = Path(work_dir) / evidence_rel
     evidence_abs.mkdir(parents=True, exist_ok=True)
 
+    deadline = getattr(agent, "deadline", None)
     results: list[StepResult] = []
     if cls.backend or cls.label == "other":
-        results.append(_verify_backend(work_dir, cfg, evidence_abs, evidence_rel))
+        results.append(_verify_backend(work_dir, cfg, evidence_abs, evidence_rel, deadline))
     if cls.frontend:
         results.append(_verify_frontend(cfg, evidence_abs, evidence_rel))
 

@@ -10,6 +10,7 @@ import os
 from . import events, gitx
 from .agent import Agent
 from .config import Config
+from .util import Deadline
 from .diff import classify
 from .steps import intent as intent_step
 from .steps import lint as lint_step
@@ -61,7 +62,8 @@ def run_pipeline(
     verification passes and BEFORE the PR step, because opening a PR references
     a branch that must already exist on the remote.
     """
-    agent = Agent(model=cfg.model)
+    deadline = Deadline(cfg.run_timeout)
+    agent = Agent(model=cfg.model, deadline=deadline)
     commit = _committer(work_dir)
     head = gitx.rev_parse(work_dir, "HEAD")
     base = _resolve_base(work_dir, base_sha, default_branch)
@@ -78,6 +80,13 @@ def run_pipeline(
     # plus a dead PID means abandoned, not slow.
     events.emit("run_start", branch=branch, classification=cls.label, files=files, pid=os.getpid())
 
+    def _budget_check(stage: str) -> bool:
+        if deadline.expired():
+            fail(f"run budget ({cfg.run_timeout}s) exhausted before {stage}; stopping")
+            events.emit("run_end", passed=False)
+            return False
+        return True
+
     intent = intent_step.capture(agent, work_dir, base, head, supplied_intent)
     info(f"intent: {intent[:200]}")
     events.emit(
@@ -88,6 +97,8 @@ def run_pipeline(
 
     results: list[StepResult] = []
 
+    if not _budget_check("lint"):
+        return False
     lint_res = lint_step.run_step(agent, work_dir, cfg)
     results.append(lint_res)
     events.emit(
@@ -101,6 +112,8 @@ def run_pipeline(
         return False
     head = gitx.rev_parse(work_dir, "HEAD")  # lint may have committed fixes
 
+    if not _budget_check("review"):
+        return False
     review_res = review_step.run_step(agent, work_dir, cfg, base, head, intent, commit)
     results.append(review_res)
     if not review_res.passed:
@@ -110,6 +123,8 @@ def run_pipeline(
         return False
     head = gitx.rev_parse(work_dir, "HEAD")  # review fixes may have committed
 
+    if not _budget_check("verify"):
+        return False
     verify_results = verify_step.run_step(agent, work_dir, cfg, cls, commit)
     results.extend(verify_results)
     for r in verify_results:
