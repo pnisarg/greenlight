@@ -11,6 +11,7 @@ Kept free of any I/O so it can be unit-tested with plain dicts.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 
 STAGE_ORDER = ("intent", "lint", "review", "verify", "pr")
@@ -54,6 +55,7 @@ class State:
     pr_status: str = ""
     pr_url: str = ""
     passed: bool | None = None
+    pid: int | None = None  # OS pid of the gate process, from run_start
     parse_errors: int = 0
 
 
@@ -102,6 +104,8 @@ def reduce(state: State, ev: dict) -> State:
         state.classification = str(ev.get("classification", ""))
         files = ev.get("files")
         state.file_count = len(files) if isinstance(files, list) else 0
+        pid = ev.get("pid")
+        state.pid = pid if isinstance(pid, int) else None
         state.stages["intent"] = "running"
     elif t == "intent":
         state.intent_source = "supplied" if ev.get("source") == "supplied" else "reconstructed"
@@ -209,6 +213,123 @@ def _stage_detail(state: State, stage: str) -> str:
     if stage == "pr":
         return state.pr_url if state.pr_url and state.pr_status != "fail" else state.pr_status
     return ""
+
+
+# --- review-log report -----------------------------------------------------
+
+_SEV_GLYPH = {"error": "✗", "warning": "!", "info": "·"}
+
+
+def render_review_log(text: str, color: bool = True) -> list[str]:
+    """Detailed per-round, per-reviewer findings report for one run's events.
+
+    Unlike the live card (a compact status summary), this prints every finding
+    the reviewers raised — the artifact you reach for when you actually want to
+    know what the bot found. Reads the raw event stream so it keeps full finding
+    detail (the `items` payload) the card-oriented `State` discards.
+    """
+    events = _parse_events(text)
+    if not events:
+        return [_c("no review activity recorded for this run", _DIM, color)]
+
+    head = _report_header(events)
+    rows: list[str] = [_c("greenlight review log", _BOLD, color)]
+    if head:
+        rows.append(_c(head, _MUTED, color))
+
+    rounds = sorted({e["round"] for e in events
+                     if e.get("type") == "reviewer" and e.get("findings") is not None
+                     and isinstance(e.get("round"), int)})
+    total = 0
+    blocking_total = 0
+    for rnd in rounds:
+        rows.append("")
+        rows.append(_c(f"round {rnd}", _BOLD, color))
+        completed = [e for e in events
+                     if e.get("type") == "reviewer" and e.get("round") == rnd
+                     and e.get("findings") is not None]
+        for ev in completed:
+            name = str(ev.get("name", ""))
+            items = ev.get("items") or []
+            n = ev.get("findings") or 0
+            blk = ev.get("blocking") or 0
+            total += int(n)
+            blocking_total += int(blk)
+            plural = "" if n == 1 else "s"
+            rows.append(_c(f"  {name}: {n} finding{plural}, {blk} blocking",
+                           _CYAN if blk else _DIM, color))
+            for it in items:
+                rows.append(_finding_row(it, color))
+            if not items and n:
+                rows.append(_c("      (detail unavailable for this run)", _DIM, color))
+
+    rows.append("")
+    verdict = _verdict(events)
+    summary = f"{total} finding{'' if total == 1 else 's'}, {blocking_total} blocking"
+    if verdict is True:
+        rows.append(_c(f"● PASSED — {summary}", _GREEN, color))
+    elif verdict is False:
+        rows.append(_c(f"● FAILED — {summary}", _RED, color))
+    else:
+        rows.append(_c(f"○ incomplete — {summary}", _DIM, color))
+    return rows
+
+
+def _parse_events(text: str) -> list[dict]:
+    out: list[dict] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(rec, dict):
+            out.append(rec)
+    return out
+
+
+def _report_header(events: list[dict]) -> str:
+    start = next((e for e in events if e.get("type") == "run_start"), None)
+    if not start:
+        return ""
+    branch = str(start.get("branch", ""))
+    cls = str(start.get("classification", "") or "?")
+    files = start.get("files")
+    n = len(files) if isinstance(files, list) else 0
+    return f"{branch}  ·  {cls}  ·  {n} file{'' if n == 1 else 's'}"
+
+
+def _finding_row(it: dict, color: bool) -> str:
+    sev = str(it.get("severity", "warning")).lower()
+    glyph = _SEV_GLYPH.get(sev, "·")
+    file = _sanitize(str(it.get("file", "")))
+    line = it.get("line")
+    loc = file + (f":{line}" if isinstance(line, int) else "")
+    desc = _sanitize(str(it.get("description", "")).strip())
+    blocks = " [blocking]" if it.get("blocks") else ""
+    code = _RED if sev == "error" else (_DIM if sev == "info" else _CYAN)
+    return _c(f"      {glyph} {loc}{blocks} — {desc}", code, color)
+
+
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+
+
+def _sanitize(s: str) -> str:
+    """Strip control/escape chars from reviewer-supplied text before printing.
+
+    Findings are LLM output influenced by the diff under review, persisted to
+    the history log and re-emitted by `greenlight review-log`. A crafted finding
+    could embed ANSI escapes; drop control chars (incl. ESC) so they render
+    inert. Tabs/newlines collapse to a space to keep each finding on one row.
+    """
+    return _CONTROL.sub("", s.replace("\t", " ").replace("\n", " "))
+
+
+def _verdict(events: list[dict]):
+    end = next((e for e in events if e.get("type") == "run_end"), None)
+    return bool(end.get("passed")) if end else None
 
 
 def render_card(state: State, color: bool = True) -> list[str]:

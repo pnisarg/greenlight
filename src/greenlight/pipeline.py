@@ -5,6 +5,8 @@ passes; the gate forwards the branch to the push target on True.
 """
 from __future__ import annotations
 
+import os
+
 from . import events, gitx
 from .agent import Agent
 from .config import Config
@@ -71,7 +73,10 @@ def run_pipeline(
         return True
     cls = classify(files, cfg.routing)
     info(f"{len(files)} changed files — classified {cls.label}")
-    events.emit("run_start", branch=branch, classification=cls.label, files=files)
+    # Stamp the pipeline PID so a watcher can tell a still-running gate apart from
+    # one that was killed mid-run (e.g. the pi window closed): a missing run_end
+    # plus a dead PID means abandoned, not slow.
+    events.emit("run_start", branch=branch, classification=cls.label, files=files, pid=os.getpid())
 
     intent = intent_step.capture(agent, work_dir, base, head, supplied_intent)
     info(f"intent: {intent[:200]}")

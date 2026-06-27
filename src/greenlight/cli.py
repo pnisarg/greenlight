@@ -5,6 +5,7 @@ Commands:
   greenlight run --intent "..."            run the pipeline on the current branch
                                            (explicit path; no push needed)
   greenlight watch                         render the live pipeline card
+  greenlight review-log [--list|--run N]   inspect reviewer findings from a run
   greenlight gc [--all]                    repack bare gate repos to reclaim disk
   greenlight hook --bare ... --work ...    internal: invoked by post-receive
   greenlight doctor                        check environment
@@ -13,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
 import sys
 import time
 from pathlib import Path
@@ -212,6 +214,8 @@ def _cmd_watch(args) -> int:
     deadline = time.monotonic() + args.timeout if args.timeout else None
     last_render = ""
     printed_lines = 0
+    last_change = time.monotonic()
+    prev_text = ""
     try:
         while True:
             text = path.read_text() if path.exists() else ""
@@ -230,12 +234,78 @@ def _cmd_watch(args) -> int:
                 last_render = block
             if state.passed is not None:
                 return 0 if state.passed else 1
+            if text != prev_text:
+                prev_text = text
+                last_change = time.monotonic()
+            # Abandoned-run detection: an unfinished run whose gate process is
+            # gone (e.g. the pi window was closed, killing the child) will never
+            # write run_end, so the card would spin forever. Once the stream has
+            # been idle past the grace window, check the stamped PID; if it's
+            # dead, stop instead of polling a corpse.
+            if (
+                args.grace
+                and time.monotonic() - last_change > args.grace
+                and not _pipeline_alive(state.pid)
+            ):
+                fail("run appears abandoned (gate process gone, no result); stopping")
+                info("inspect what was recorded with `greenlight review-log`")
+                return 3
             if deadline and time.monotonic() > deadline:
                 fail("watch timed out before the run finished")
                 return 2
             time.sleep(args.interval)
     except KeyboardInterrupt:
         return 130
+
+
+def _pipeline_alive(pid: int | None) -> bool:
+    """Whether the gate process is still running.
+
+    Unknown pid (older runs without the stamp) is treated as alive so we never
+    falsely abandon a run we can't verify; only a stamped-but-dead pid trips the
+    abandoned-run guard.
+    """
+    if not pid:
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, owned by someone else
+    return True
+
+
+def _cmd_review_log(args) -> int:
+    """Show the reviewer findings from a past run.
+
+    The PR deliberately carries no findings; this is the way to inspect what the
+    reviewers actually flagged. Reads the per-repo event logs greenlight
+    archives (latest run by default; `--list` enumerates retained runs and
+    `--run N` selects one, newest = 1).
+    """
+    root = gitx.main_repo_root(args.work or ".")
+    logs = events.run_logs(root)
+    color = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+    if not logs:
+        fail("no runs recorded yet for this repo")
+        return 1
+
+    if args.list:
+        step(f"{len(logs)} retained run(s) (newest first)")
+        for i, p in enumerate(logs, start=1):
+            st = render.state_from(p.read_text())
+            verdict = "?" if st.passed is None else ("pass" if st.passed else "fail")
+            info(f"{i}. {st.branch or p.stem}  [{verdict}]  {p.name}")
+        return 0
+
+    if args.run < 1 or args.run > len(logs):
+        fail(f"run {args.run} out of range (1..{len(logs)})")
+        return 1
+    chosen = logs[args.run - 1]
+    for line in render.render_review_log(chosen.read_text(), color):
+        print(line)
+    return 0
 
 
 def _human_bytes(n: int) -> str:
@@ -325,6 +395,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="poll interval in seconds (default: 0.5)")
     pw.add_argument("--timeout", type=float, default=0,
                     help="give up after N seconds of no completion (0 = wait forever)")
+    pw.add_argument("--grace", type=float, default=120,
+                    help="declare a run abandoned after N idle seconds if its gate "
+                         "process is dead (0 = never; default: 120)")
     pw.set_defaults(func=_cmd_watch)
 
     pg = sub.add_parser("gc", help="repack bare gate repos to reclaim disk")
@@ -333,13 +406,51 @@ def build_parser() -> argparse.ArgumentParser:
                     help="gc every provisioned gate repo, not just this one")
     pg.set_defaults(func=_cmd_gc)
 
+    prl = sub.add_parser("review-log", help="inspect reviewer findings from a past run")
+    prl.add_argument("--work", default=".")
+    prl.add_argument("--list", action="store_true",
+                     help="list retained runs (newest first) instead of showing findings")
+    prl.add_argument("--run", type=int, default=1,
+                     help="which run to show, newest = 1 (default: 1)")
+    prl.set_defaults(func=_cmd_review_log)
+
     pd = sub.add_parser("doctor", help="check the environment")
     pd.set_defaults(func=_cmd_doctor)
     return p
 
 
+def _install_termination_handlers() -> None:
+    """Turn SIGTERM/SIGHUP into a KeyboardInterrupt so the run unwinds cleanly.
+
+    When the pi window closes, the spawned `greenlight run` gets SIGTERM/SIGHUP,
+    whose default action terminates the process instantly — skipping the worktree
+    context manager's `finally`, which is how a run leaves an orphaned worktree
+    behind. Raising instead lets the `with worktree.checkout(...)` teardown run
+    (and subprocess.run kills its child agent on the way out).
+    """
+    def _raise(signum, _frame):
+        # Reset both handlers to default immediately so a second signal (e.g. a
+        # harness escalating SIGTERM->SIGKILL, or SIGHUP+SIGTERM on close)
+        # delivered while the worktree teardown's `finally` is running can't
+        # raise again and abort cleanup partway — which would re-strand the very
+        # worktree this unwinding is meant to remove. One clean interrupt only.
+        for s in (signal.SIGTERM, signal.SIGHUP):
+            try:
+                signal.signal(s, signal.SIG_DFL)
+            except (ValueError, OSError):
+                pass
+        raise KeyboardInterrupt
+
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        try:
+            signal.signal(sig, _raise)
+        except (ValueError, OSError):
+            pass  # not in main thread / unsupported platform
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    _install_termination_handlers()
     try:
         return args.func(args)
     except GreenlightError as e:

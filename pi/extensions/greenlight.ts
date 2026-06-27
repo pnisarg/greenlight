@@ -11,7 +11,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { closeSync, mkdtempSync, openSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -84,6 +84,7 @@ export default function greenlightExtension(pi: ExtensionAPI) {
 			const cwd = params.cwd ?? ctx.cwd;
 			const eventsDir = mkdtempSync(join(tmpdir(), "greenlight-events-"));
 			const eventsFile = join(eventsDir, "events.jsonl");
+			const stderrFile = join(eventsDir, "stderr.log");
 			const state = initialState();
 			finalStates.set(toolCallId, { state, done: false });
 			const statusKey = `greenlight:${toolCallId}`;
@@ -119,21 +120,34 @@ export default function greenlightExtension(pi: ExtensionAPI) {
 				push();
 			};
 
+			// Survive window close: spawn the gate detached (its own process group,
+			// so a SIGHUP to pi doesn't cascade and kill the run mid-review) AND
+			// redirect its stdout/stderr to a file rather than pipes back to pi.
+			// Piping to a dying parent is the subtle trap: once pi exits, the gate's
+			// next stderr write (every step/info line) would hit a broken pipe and
+			// crash it. A file fd has no such coupling, so the run truly outlives the
+			// window. We read progress from the events file and the failure tail from
+			// stderrFile. The gate also writes events to the per-repo mirror, so
+			// `greenlight watch` can re-attach to a run whose window has closed.
+			const errFd = openSync(stderrFile, "a");
 			const child = spawn("greenlight", ["run", "--intent-file", "-"], {
 				cwd,
 				env: { ...process.env, GREENLIGHT_EVENTS: eventsFile, GREENLIGHT_FORCE_COLOR: "0" },
-				stdio: ["pipe", "pipe", "pipe"],
+				stdio: ["pipe", errFd, errFd],
+				detached: true,
 			});
-			child.stdin.write(params.intent);
-			child.stdin.end();
+			closeSync(errFd); // the child holds its own dup; we read the file by path
+			child.unref();
+			child.stdin?.write(params.intent);
+			child.stdin?.end();
 
-			let stderr = "";
-			child.stderr.on("data", (b: Buffer) => {
-				stderr += b.toString();
-			});
-			// Drain stdout so its pipe never fills and blocks the child; we read
-			// progress from the events file, not stdout.
-			child.stdout.on("data", () => {});
+			const readStderrTail = (n: number): string => {
+				try {
+					return readFileSync(stderrFile, "utf8").trim().split("\n").slice(-n).join("\n");
+				} catch {
+					return "";
+				}
+			};
 
 			const poll = setInterval(drain, 250);
 			// Tick the spinner even when no new events arrive, so a long-running
@@ -141,7 +155,18 @@ export default function greenlightExtension(pi: ExtensionAPI) {
 			const tick = setInterval(() => {
 				if (state.passed == null) push();
 			}, 120);
-			const onAbort = () => child.kill("SIGTERM");
+			// Explicit cancel (Esc / tool abort) should stop the whole run. Signal
+			// the process *group* (negative pid) since we spawned detached; fall back
+			// to the bare child if the group send fails. The gate's SIGTERM handler
+			// then unwinds its worktree cleanup.
+			const onAbort = () => {
+				try {
+					if (child.pid) process.kill(-child.pid, "SIGTERM");
+					else child.kill("SIGTERM");
+				} catch {
+					child.kill("SIGTERM");
+				}
+			};
 			signal?.addEventListener("abort", onAbort, { once: true });
 
 			const code: number = await new Promise((resolve) => {
@@ -153,18 +178,19 @@ export default function greenlightExtension(pi: ExtensionAPI) {
 			clearInterval(tick);
 			signal?.removeEventListener("abort", onAbort);
 			drain(); // final flush
-			rmSync(eventsDir, { recursive: true, force: true });
-			finalStates.set(toolCallId, { state, done: true });
-			if (ctx.hasUI) ctx.ui.setStatus(statusKey, undefined);
 
 			const passed = state.passed === true && code === 0;
 			let text = summarize(state);
 			if (state.passed == null) {
 				// Pipeline died before run_end — surface the tail of stderr so the
-				// agent can act, rather than a bare exit code.
-				const tail = stderr.trim().split("\n").slice(-8).join("\n");
+				// agent can act, rather than a bare exit code. Read it BEFORE rmSync
+				// below deletes the dir that holds stderr.log.
+				const tail = readStderrTail(8);
 				text = `greenlight: did not complete (exit ${code}).\n${tail}`;
 			}
+			rmSync(eventsDir, { recursive: true, force: true });
+			finalStates.set(toolCallId, { state, done: true });
+			if (ctx.hasUI) ctx.ui.setStatus(statusKey, undefined);
 
 			if (!passed) {
 				// Mark the tool result as an error so the agent treats it as a gate
