@@ -13,11 +13,39 @@ intent stable.
 from __future__ import annotations
 
 
+from dataclasses import dataclass
+
 from .. import events
 from ..agent import Agent
 from ..config import Config, Reviewer
-from ..util import info, ok, step, warn
+from ..util import GreenlightError, info, ok, step, warn
 from .types import Finding, StepResult
+
+# A reviewer that returns no parseable verdict (timed out, pi failed, or emitted
+# prose instead of the findings schema) must never be read as "clean" — that is
+# a false green light, the worst failure mode for a gate. We fail the gate closed
+# with a synthesized blocking finding so the card and review-log show why; the
+# specific cause (so the operator knows whether to bump the timeout, check the
+# gateway, or check the model) is appended per failure.
+_INCONCLUSIVE_DESC = (
+    "reviewer returned no usable verdict; failing the gate closed rather than "
+    "treating an un-run review as clean"
+)
+
+
+@dataclass
+class _Verdict:
+    """Outcome of one reviewer invocation.
+
+    findings is None when the verdict is inconclusive (no parseable findings
+    list); reason carries the diagnostic, and timed_out marks a hard timeout
+    (pi exit 124) — a hung reviewer that a retry won't fix, vs. a transient blip
+    that one might.
+    """
+
+    findings: list[Finding] | None
+    reason: str = ""
+    timed_out: bool = False
 
 _REVIEW_SCHEMA_HINT = (
     'Return ONLY a fenced ```json block with this shape:\n'
@@ -72,16 +100,16 @@ def _parse_findings(payload, reviewer: str) -> list[Finding]:
     return out
 
 
-def _run_reviewers(
-    agent: Agent, work_dir: str, cfg: Config, base: str, head: str, intent: str, rnd: int
-) -> list[Finding]:
-    findings: list[Finding] = []
-    for r in cfg.reviewers:
-        if not r.enabled:
-            continue
-        info(f"reviewer: {r.name}")
-        events.emit("reviewer", name=r.name, round=rnd, findings=None, blocking=None)
-        skills = [r.skill] if r.skill else None
+def _review_once(
+    agent: Agent, work_dir: str, r: Reviewer, base: str, head: str, intent: str
+) -> _Verdict:
+    """Run one reviewer. Returns a _Verdict whose findings is None when the
+    verdict is inconclusive — the agent raised, or its output had no `findings`
+    list (prose, truncated JSON, a degraded gateway). None must never be read as
+    "clean"; the reason/timed_out fields let the caller report and route it.
+    """
+    skills = [r.skill] if r.skill else None
+    try:
         res = agent.run(
             _reviewer_prompt(r, base, head, intent),
             cwd=work_dir,
@@ -89,7 +117,74 @@ def _run_reviewers(
             skills=skills,
             timeout=1200,
         )
-        rf = _parse_findings(res.json(), r.name)
+    except GreenlightError as exc:
+        msg = str(exc).splitlines()[0]
+        # agent.run formats the message as "pi invocation failed (<code>): ...";
+        # exit 124 is the timeout convention (util.run), so a hung reviewer.
+        return _Verdict(None, reason=f"pi failed: {msg}", timed_out="(124)" in msg)
+    payload = res.json()
+    if not (isinstance(payload, dict) and isinstance(payload.get("findings"), list)):
+        if res.code == 124:
+            return _Verdict(None, reason="pi timed out (exit 124) with unparseable output",
+                            timed_out=True)
+        reason = (
+            f"pi exited {res.code} without the findings schema"
+            if res.code
+            else "pi returned prose / invalid JSON, not the findings schema"
+        )
+        return _Verdict(None, reason=reason)
+    return _Verdict(_parse_findings(payload, r.name))
+
+
+def _inconclusive_finding(reviewer: str, reason: str) -> Finding:
+    return Finding(
+        severity="error",
+        file="",
+        line=None,
+        description=f"{_INCONCLUSIVE_DESC} (cause: {reason})",
+        reviewer=reviewer,
+    )
+
+
+def _run_reviewers(
+    agent: Agent, work_dir: str, cfg: Config, base: str, head: str, intent: str, rnd: int
+) -> tuple[list[Finding], list[str]]:
+    """Run every enabled reviewer once. Returns (findings, inconclusive_names).
+
+    A reviewer that yields no usable verdict is retried once; if it still fails it
+    is recorded as inconclusive (with a synthesized blocking finding for the card
+    and review-log) so the caller can fail the gate closed instead of shipping an
+    un-reviewed change.
+    """
+    findings: list[Finding] = []
+    inconclusive: list[str] = []
+    for r in cfg.reviewers:
+        if not r.enabled:
+            continue
+        info(f"reviewer: {r.name}")
+        events.emit("reviewer", name=r.name, round=rnd, findings=None, blocking=None)
+        v = _review_once(agent, work_dir, r, base, head, intent)
+        # Retry once to absorb a transient gateway blip — but not a hard timeout,
+        # which is a hung reviewer a retry only doubles the latency of (notably in
+        # the uncapped run_timeout=0 path, where the Deadline doesn't clamp it).
+        if v.findings is None and not v.timed_out:
+            warn(f"  {r.name}: {v.reason}; retrying once")
+            v = _review_once(agent, work_dir, r, base, head, intent)
+        if v.findings is None:
+            warn(f"  {r.name}: {v.reason}; failing the gate closed")
+            synth = _inconclusive_finding(r.name, v.reason)
+            inconclusive.append(r.name)
+            findings.append(synth)
+            events.emit(
+                "reviewer",
+                name=r.name,
+                round=rnd,
+                findings=1,
+                blocking=1,
+                items=[_finding_event(synth, True)],
+            )
+            continue
+        rf = v.findings
         blocking = [f for f in rf if f.blocks(r.blocking_severity)]
         info(f"  {len(rf)} findings ({len(blocking)} blocking)")
         events.emit(
@@ -101,7 +196,7 @@ def _run_reviewers(
             items=[_finding_event(f, f.blocks(r.blocking_severity)) for f in rf],
         )
         findings.extend(rf)
-    return findings
+    return findings, inconclusive
 
 
 def _finding_event(f: Finding, blocks: bool) -> dict:
@@ -168,8 +263,20 @@ def run_step(
             )
         info(f"round {rnd}/{cfg.max_review_rounds}")
         events.emit("review_round", round=rnd, max_rounds=cfg.max_review_rounds)
-        findings = _run_reviewers(agent, work_dir, cfg, base, head, intent, rnd)
+        findings, inconclusive = _run_reviewers(agent, work_dir, cfg, base, head, intent, rnd)
         all_findings = findings
+        if inconclusive:
+            # Infrastructure failure, not a code defect: the fix agent can't
+            # repair a flaky reviewer, so don't enter the fix loop. Fail fast and
+            # loud — the review didn't actually run.
+            names = ", ".join(inconclusive)
+            warn(f"review inconclusive: {names} returned no usable verdict")
+            return StepResult(
+                name="review",
+                passed=False,
+                summary=f"review inconclusive ({names}); failed closed",
+                findings=findings,
+            )
         blocking = _blocking(findings, cfg)
         if not blocking:
             ok(f"review clean ({len(findings)} non-blocking notes)")

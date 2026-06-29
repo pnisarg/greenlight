@@ -6,6 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- The review gate no longer fails **open** on an inconclusive reviewer. A
+  reviewer whose pi call raised (timeout/crash) or whose output carried no
+  `findings` list (prose, truncated JSON, a degraded gateway) was parsed as
+  "0 findings → clean" — a false green light, the worst failure for a gate. It
+  was also inconsistent: a timeout with no text crashed the whole gate while a
+  timeout with partial text silently passed. A transient blip (pi crash or
+  unparseable output) is retried once; a hard timeout (exit 124) is *not* retried
+  — it's a hung reviewer, and retrying only doubles worst-case latency in the
+  uncapped `run_timeout=0` path. If the verdict is still inconclusive the review
+  fails **closed** with a synthesized blocking finding that names the cause
+  (timeout vs. crash vs. prose, so the operator knows whether to bump the
+  timeout, check the gateway, or check the model), visible on the card and in
+  `greenlight review-log`. The fix loop is skipped since a flaky reviewer isn't a
+  code defect the fix agent can repair.
+
 ### Added
 - `run_timeout` config (default 1200s): a single wall-clock budget for the whole
   run. A shared deadline clamps every agent/subprocess call to the time
