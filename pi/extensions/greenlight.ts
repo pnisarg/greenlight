@@ -15,6 +15,8 @@ import { closeSync, mkdtempSync, openSync, readFileSync, rmSync, statSync } from
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { EVENTS_PREFIX, sweepStaleEventDirs } from "./tmp-sweep";
+
 import { keyHint, type ExtensionAPI, type Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -82,7 +84,8 @@ export default function greenlightExtension(pi: ExtensionAPI) {
 		parameters: PARAMS,
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			const cwd = params.cwd ?? ctx.cwd;
-			const eventsDir = mkdtempSync(join(tmpdir(), "greenlight-events-"));
+			sweepStaleEventDirs(tmpdir()); // self-heal: reclaim dirs leaked by hard-killed runs
+			const eventsDir = mkdtempSync(join(tmpdir(), EVENTS_PREFIX));
 			const eventsFile = join(eventsDir, "events.jsonl");
 			const stderrFile = join(eventsDir, "stderr.log");
 			const state = initialState();
