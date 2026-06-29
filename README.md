@@ -20,8 +20,8 @@ remote once every gate is green.
         clean PR on your real remote
 ```
 
-It's built small and opinionated — ~2.2k lines of stdlib Python, driven by
-[`pi`](https://pi.dev) — around two ideas:
+It's small and opinionated, driven by [`pi`](https://pi.dev), and built around
+two ideas:
 
 1. **A real review loop you configure.** Multiple reviewers (brutal code review,
    security, your own focus or a pi skill) each run independently and read-only;
@@ -46,8 +46,8 @@ plus a `post-receive` hook that intercepts your push, runs the pipeline in a
 throwaway worktree, and forwards to the real remote only when every gate is
 green.
 
-> Status: experimental (v0.1). Built fast; the idea is solid but it has not yet
-> gated large volumes of real-world PRs. Dogfood it before you rely on it.
+> Status: experimental (v0.1). The idea is solid but it has not yet gated large
+> volumes of real-world PRs. Dogfood it before you rely on it.
 
 ## Install
 
