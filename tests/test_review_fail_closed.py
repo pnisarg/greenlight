@@ -21,8 +21,8 @@ class _ScriptedAgent:
     """Returns/raises per call from a script, so we can model retries."""
 
     def __init__(self, outcomes):
-        # outcomes: list of either a dict payload (JSON), a raw str, or an
-        # Exception instance to raise on that call.
+        # outcomes: list of either a dict payload (JSON), a raw str, an
+        # (text, code) tuple to model a non-zero exit, or an Exception to raise.
         self._outcomes = list(outcomes)
         self.deadline = None
         self.calls = 0
@@ -32,6 +32,9 @@ class _ScriptedAgent:
         self.calls += 1
         if isinstance(outcome, Exception):
             raise outcome
+        if isinstance(outcome, tuple):
+            text, code = outcome
+            return AgentResult(text=str(text), code=code)
         if isinstance(outcome, dict):
             return AgentResult(text="```json\n" + json.dumps(outcome) + "\n```", code=0)
         return AgentResult(text=str(outcome), code=0)
@@ -70,16 +73,42 @@ def test_prose_with_no_findings_list_is_inconclusive_not_clean(tmp_path):
 
 
 def test_agent_error_is_inconclusive(tmp_path):
-    """A pi failure (e.g. timeout with no text) raises GreenlightError; it must
-    be caught and treated as inconclusive, never crashing the gate."""
-    agent = _ScriptedAgent([GreenlightError("pi invocation failed (124)"),
-                            GreenlightError("pi invocation failed (124)")])
+    """A pi crash (non-timeout GreenlightError) is caught, retried once, and
+    treated as inconclusive — never crashing the gate."""
+    agent = _ScriptedAgent([GreenlightError("pi invocation failed (1): boom"),
+                            GreenlightError("pi invocation failed (1): boom")])
     findings, inconclusive = review._run_reviewers(
         agent, str(tmp_path), _one_reviewer_cfg(), "B", "H", "i", 1
     )
     assert agent.calls == 2
     assert inconclusive == ["brutal"]
     assert findings and findings[0].blocks("warning")
+    assert "cause" in findings[0].description
+
+
+def test_hard_timeout_is_not_retried(tmp_path):
+    """A hard timeout (exit 124) is a hung reviewer, not a transient blip:
+    fail closed immediately without doubling latency on a retry."""
+    # raised-timeout path: agent.run raises with a (124) message.
+    agent = _ScriptedAgent([GreenlightError("pi invocation failed (124): timed out")])
+    findings, inconclusive = review._run_reviewers(
+        agent, str(tmp_path), _one_reviewer_cfg(), "B", "H", "i", 1
+    )
+    assert agent.calls == 1  # NOT retried
+    assert inconclusive == ["brutal"]
+    assert "124" in findings[0].description
+
+
+def test_timeout_with_partial_text_is_not_retried(tmp_path):
+    """A timeout that returned partial unparseable text (AgentResult code=124)
+    is also a hung reviewer: inconclusive, no retry."""
+    agent = _ScriptedAgent([("partial output, no json", 124)])
+    findings, inconclusive = review._run_reviewers(
+        agent, str(tmp_path), _one_reviewer_cfg(), "B", "H", "i", 1
+    )
+    assert agent.calls == 1
+    assert inconclusive == ["brutal"]
+    assert "124" in findings[0].description
 
 
 def test_retry_recovers_a_transient_blip(tmp_path):
@@ -137,3 +166,4 @@ def test_inconclusive_emits_blocking_reviewer_event(monkeypatch, tmp_path):
     assert ev["blocking"] == 1
     assert ev["items"][0]["blocks"] is True
     assert "no usable verdict" in ev["items"][0]["description"]
+    assert "cause" in ev["items"][0]["description"]
