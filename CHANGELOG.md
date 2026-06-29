@@ -15,6 +15,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   lint + reviewers x rounds + verify) to ~4.5h. `0` disables the cap.
 
 ### Fixed
+- The pi extension no longer leaks a `/tmp/greenlight-events-*` dir per run.
+  Since the gate is spawned detached (to survive the window closing), the tool's
+  own cleanup is skipped on that path; each new run now sweeps stale events dirs
+  left by hard-killed runs, mirroring the worktree self-heal. Best-effort and
+  age-gated (6h) so it never races a concurrent live run.
 - A run launched from the pi `greenlight_run` tool no longer dies when the pi
   window closes: the extension spawns the gate detached (its own process group)
   with stdio redirected to a file instead of pipes back to pi, so a parent
