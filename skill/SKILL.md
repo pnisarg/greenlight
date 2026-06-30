@@ -125,6 +125,20 @@ greenlight classifies the diff and routes verification:
 Evidence is committed under the evidence dir so it travels with the branch and
 renders on the PR.
 
+## CI monitoring (opt-in)
+
+When `[ci] enabled = true` in `.greenlight.toml`, greenlight does not stop at
+opening the PR: after the PR is up it polls the PR's **real CI checks** and only
+reports green once CI is green. On a failing check it pulls the failed job logs
+(`gh run --log-failed`), applies an intent-preserving fix, re-pushes, and
+re-polls — up to `max_fix_rounds`. This is the authoritative test signal for
+repos whose tests need deps/services the throwaway worktree can't reproduce
+(e.g. monorepos), so local `verify` can be a no-op and CI is the gate. It needs
+`gh` and is GitHub-only. Because the run now blocks on real CI, it can take many
+minutes — do not cancel because it seems slow. If CI stays red after the fix
+budget, the gate fails with the PR left open for a manual fix; report which
+checks failed.
+
 ## Reporting the outcome
 
 On exit 0: tell the user what was validated — the classification, reviewer

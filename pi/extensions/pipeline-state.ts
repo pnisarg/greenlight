@@ -16,9 +16,9 @@
 
 export type StageStatus = "pending" | "running" | "done" | "fail" | "skip";
 
-export type StageName = "intent" | "lint" | "review" | "verify" | "pr";
+export type StageName = "intent" | "lint" | "review" | "verify" | "pr" | "ci";
 
-export const STAGE_ORDER: StageName[] = ["intent", "lint", "review", "verify", "pr"];
+export const STAGE_ORDER: StageName[] = ["intent", "lint", "review", "verify", "pr", "ci"];
 
 export interface Finding {
 	severity: string;
@@ -51,6 +51,8 @@ export interface PipelineState {
 	};
 	verify: { target: string; status: StageStatus }[];
 	pr: { status: string; url: string };
+	/** Post-PR CI monitoring. `seen` gates whether the CI row renders at all. */
+	ci: { seen: boolean; passed: number; total: number; fixes: number };
 	passed: boolean | null;
 	/** Epoch seconds of the first event seen for each stage (for elapsed time). */
 	stageStart: Partial<Record<StageName, number>>;
@@ -74,10 +76,11 @@ export function initialState(): PipelineState {
 		fileCount: 0,
 		intentSource: null,
 		intentText: "",
-		stages: { intent: "pending", lint: "pending", review: "pending", verify: "pending", pr: "pending" },
+		stages: { intent: "pending", lint: "pending", review: "pending", verify: "pending", pr: "pending", ci: "pending" },
 		review: { round: 0, maxRounds: 0, fixes: 0, reviewers: [] },
 		verify: [],
 		pr: { status: "", url: "" },
+		ci: { seen: false, passed: 0, total: 0, fixes: 0 },
 		passed: null,
 		stageStart: {},
 		lastTs: 0,
@@ -95,6 +98,8 @@ const STAGE_FOR_EVENT: Record<string, StageName> = {
 	fix: "review",
 	verify: "verify",
 	pr: "pr",
+	ci: "ci",
+	ci_fix: "ci",
 };
 
 function statusFor(s: string): StageStatus {
@@ -186,6 +191,30 @@ export function reduce(state: PipelineState, ev: GreenlightEvent): PipelineState
 							: "pending";
 			break;
 		}
+		case "ci": {
+			state.stages.review = settleReview(state);
+			state.ci.seen = true;
+			const status = String(ev.status ?? "");
+			state.stages.ci =
+				status === "running"
+					? "running"
+					: status === "pass"
+						? "done"
+						: status === "fail"
+							? "fail"
+							: status === "skip"
+								? "skip"
+								: "pending";
+			if (typeof ev.checks === "number") state.ci.passed = ev.checks;
+			if (typeof ev.total === "number") state.ci.total = ev.total;
+			break;
+		}
+		case "ci_fix": {
+			state.ci.seen = true;
+			state.ci.fixes += 1;
+			state.stages.ci = "running";
+			break;
+		}
 		case "run_end": {
 			state.passed = Boolean(ev.passed);
 			finalize(state);
@@ -216,15 +245,22 @@ function finalize(state: PipelineState): void {
 		for (const s of ["intent", "lint", "review", "verify"] as StageName[]) {
 			if (state.stages[s] === "running" || state.stages[s] === "pending") state.stages[s] = "done";
 		}
+		if (state.ci.seen && (state.stages.ci === "running" || state.stages.ci === "pending")) state.stages.ci = "done";
 		return;
 	}
-	// Failed: the first gate still "running" is the one that blocked. Leave the
-	// stages after it as pending so the card shows where the pipeline stopped.
-	for (const s of ["intent", "lint", "review", "verify", "pr"] as StageName[]) {
+	// Failed: the first gate still "running" is the one that blocked (promote it
+	// to fail). A stage may already carry "fail" (e.g. the CI gate sets its own
+	// status), so fall back to the earliest failed stage. Leave the stages after
+	// it as pending so the card shows where the pipeline stopped.
+	for (const s of STAGE_ORDER) {
 		if (state.stages[s] === "running") {
 			state.stages[s] = "fail";
 			state.failedStage = s;
-			break;
+			return;
+		}
+		if (state.stages[s] === "fail") {
+			state.failedStage = s;
+			return;
 		}
 	}
 }
@@ -350,6 +386,7 @@ const STAGE_LABEL: Record<StageName, string> = {
 	review: "review",
 	verify: "verify",
 	pr: "PR",
+	ci: "CI",
 };
 
 /** Pull the PR number out of a github pull URL, if present. */
@@ -392,20 +429,33 @@ function stageDetail(state: PipelineState, stage: StageName): string {
 			if (num) return `#${num} ${state.pr.status || "opened"}`;
 			return state.pr.url || state.pr.status;
 		}
+		case "ci": {
+			const parts: string[] = [];
+			if (state.ci.total) parts.push(`${state.ci.passed}/${state.ci.total} checks`);
+			if (state.ci.fixes) parts.push(`${state.ci.fixes} fix${state.ci.fixes > 1 ? "es" : ""}`);
+			return parts.join(" · ");
+		}
 		default:
 			return "";
 	}
 }
 
 /** Fraction of the pipeline complete: terminal stages count full, running half. */
+function visibleStages(state: PipelineState): StageName[] {
+	// The CI row only exists once CI monitoring runs; runs with ci disabled (and
+	// pre-ci event logs) render exactly as before.
+	return state.ci.seen ? STAGE_ORDER : STAGE_ORDER.filter((s) => s !== "ci");
+}
+
 function progressFraction(state: PipelineState): number {
+	const stages = visibleStages(state);
 	let done = 0;
-	for (const s of STAGE_ORDER) {
+	for (const s of stages) {
 		const st = state.stages[s];
 		if (st === "done" || st === "skip" || st === "fail") done += 1;
 		else if (st === "running") done += 0.5;
 	}
-	return done / STAGE_ORDER.length;
+	return done / stages.length;
 }
 
 const BAR_WIDTH = 14;
@@ -473,7 +523,7 @@ export function renderCard(state: PipelineState, p: Painter = plain, opts: Rende
 	rows.push(meter);
 	rows.push("");
 
-	for (const stage of STAGE_ORDER) {
+	for (const stage of visibleStages(state)) {
 		const st = state.stages[stage];
 		const glyphChar = st === "running" && opts.spinner ? opts.spinner : GLYPH[st];
 		const glyph = paint(p, COLOR[st], glyphChar);
@@ -591,6 +641,10 @@ export function summarize(state: PipelineState): string {
 
 	if (state.pr.status) {
 		lines.push(`pr: ${state.pr.status}${state.pr.url && state.pr.status !== "fail" ? ` ${state.pr.url}` : ""}`);
+	}
+	if (state.ci.seen) {
+		const counts = state.ci.total ? ` (${state.ci.passed}/${state.ci.total} checks)` : "";
+		lines.push(`ci: ${state.stages.ci}${counts}`);
 	}
 	if (state.intentSource === "reconstructed") {
 		lines.push("note: intent was reconstructed from the diff (none supplied) — review ran on a weaker signal.");

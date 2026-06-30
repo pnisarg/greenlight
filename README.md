@@ -197,6 +197,17 @@ url = "http://localhost:3000"
 # server_cmd = "npm run dev"             # booted to capture a screenshot
 ready_path = "/"
 
+[ci]
+# Post-PR CI monitoring. After the PR opens, poll its checks, auto-fix failures
+# (intent-preserving) up to max_fix_rounds, and only report green once the real
+# remote CI is green. The authoritative test signal when tests need deps or
+# services the throwaway worktree can't provide. Requires `gh`; GitHub only.
+enabled = false
+# provider = "github"
+# timeout = 2700                         # idle seconds before giving up (0 = forever)
+# max_fix_rounds = 2                     # intent-preserving fix attempts on failure
+# required_checks = []                   # gate only on these check names; empty = all
+
 [routing]
 # Override the file globs that classify a change as frontend/backend.
 # frontend = ["*.tsx", "frontend/*"]
@@ -212,6 +223,7 @@ ready_path = "/"
 | **review loop** | N configurable read-only reviewers → intent-preserving fix → re-review, up to `max_review_rounds`. | no blocking findings remain |
 | **verify** | Backend tests and/or frontend screenshot based on diff classification; evidence committed. | tests pass / server boots |
 | **PR** | Composes intent + evidence into the PR body, opens via `gh`. Idempotent. | — |
+| **ci** (opt-in) | Polls the PR's real CI checks; on failure pulls `gh run --log-failed`, applies an intent-preserving fix, re-pushes, re-polls (≤ `max_fix_rounds`). | CI green |
 
 ## Development
 
@@ -236,7 +248,7 @@ src/greenlight/
   render.py     reducer + card renderer for `greenlight watch`
   gitx.py       git command helpers
   util.py       process runner, logging, state paths
-  steps/        intent, lint, review, verify, pr
+  steps/        intent, lint, review, verify, pr, ci
 
 pi/extensions/
   pipeline-state.ts   pure reducer + card renderer over the event stream

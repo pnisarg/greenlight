@@ -14,13 +14,14 @@ import json
 import re
 from dataclasses import dataclass, field
 
-STAGE_ORDER = ("intent", "lint", "review", "verify", "pr")
+STAGE_ORDER = ("intent", "lint", "review", "verify", "pr", "ci")
 _STAGE_LABEL = {
     "intent": "intent",
     "lint": "lint",
     "review": "review",
     "verify": "verify",
     "pr": "PR",
+    "ci": "CI",
 }
 _GLYPH = {"pending": "·", "running": "⟳", "done": "✓", "fail": "✗", "skip": "⊘"}
 
@@ -54,6 +55,10 @@ class State:
     verify: list[tuple[str, str]] = field(default_factory=list)  # (target, status)
     pr_status: str = ""
     pr_url: str = ""
+    ci_seen: bool = False  # whether any CI-monitor event arrived (else hide row)
+    ci_passed: int = 0
+    ci_total: int = 0
+    ci_fixes: int = 0
     passed: bool | None = None
     pid: int | None = None  # OS pid of the gate process, from run_start
     parse_errors: int = 0
@@ -89,6 +94,8 @@ def _finalize(state: State) -> None:
         for s in ("intent", "lint", "review", "verify"):
             if state.stages[s] in ("running", "pending"):
                 state.stages[s] = "done"
+        if state.ci_seen and state.stages["ci"] in ("running", "pending"):
+            state.stages["ci"] = "done"
         return
     for s in STAGE_ORDER:
         if state.stages[s] == "running":
@@ -151,6 +158,21 @@ def reduce(state: State, ev: dict) -> State:
             "skip": "skip",
             "fail": "fail",
         }.get(state.pr_status, "pending")
+    elif t == "ci":
+        _settle_review(state)
+        state.ci_seen = True
+        status = str(ev.get("status", ""))
+        state.stages["ci"] = {
+            "running": "running", "pass": "done", "fail": "fail", "skip": "skip",
+        }.get(status, "pending")
+        if isinstance(ev.get("checks"), int):
+            state.ci_passed = int(ev["checks"])
+        if isinstance(ev.get("total"), int):
+            state.ci_total = int(ev["total"])
+    elif t == "ci_fix":
+        state.ci_seen = True
+        state.ci_fixes += 1
+        state.stages["ci"] = "running"
     elif t == "run_end":
         state.passed = bool(ev.get("passed"))
         _finalize(state)
@@ -212,6 +234,13 @@ def _stage_detail(state: State, stage: str) -> str:
         return ", ".join(f"{tg} {st}" for tg, st in state.verify)
     if stage == "pr":
         return state.pr_url if state.pr_url and state.pr_status != "fail" else state.pr_status
+    if stage == "ci":
+        parts = []
+        if state.ci_total:
+            parts.append(f"{state.ci_passed}/{state.ci_total} checks")
+        if state.ci_fixes:
+            parts.append(f"{state.ci_fixes} fix{'es' if state.ci_fixes != 1 else ''}")
+        return ", ".join(parts)
     return ""
 
 
@@ -342,6 +371,10 @@ def render_card(state: State, color: bool = True) -> list[str]:
     rows.append(_c("greenlight ", _BOLD, color) + _c(header, _MUTED, color))
 
     for stage in STAGE_ORDER:
+        # Hide the CI row entirely unless CI monitoring actually ran, so runs
+        # with ci disabled (and pre-ci event logs) render exactly as before.
+        if stage == "ci" and not state.ci_seen:
+            continue
         st = state.stages[stage]
         glyph = _c(_GLYPH[st], _STATUS_COLOR[st], color)
         label = _STAGE_LABEL[stage].ljust(7)

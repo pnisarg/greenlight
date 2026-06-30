@@ -264,6 +264,62 @@ test("renderCard meter fills fully and reads 'passed' on success", () => {
 	assert.match(meter, /passed/);
 });
 
+test("CI row is hidden until CI monitoring runs, and the meter still fills on pass", () => {
+	const s = initialState();
+	applyLines(s, PASSING); // no ci events
+	const lines = renderCard(s, plain, { now: 11 });
+	assert.ok(!lines.some((l) => l.includes("CI")), "CI row must be hidden when ci disabled");
+	const meter = lines[1];
+	assert.ok(!meter.includes("▱"), "meter fills fully without ci in the denominator");
+});
+
+test("CI events add a row, track checks, and gate the verdict", () => {
+	const s = initialState();
+	applyLines(
+		s,
+		[
+			{ ts: 1, type: "run_start", branch: "feat/x", classification: "backend", files: ["a.py"] },
+			{ ts: 2, type: "intent", source: "supplied", text: "x" },
+			{ ts: 3, type: "lint", status: "skip" },
+			{ ts: 4, type: "pr", status: "open", url: "https://github.com/x/y/pull/7" },
+			{ ts: 5, type: "ci", status: "running", checks: 1, total: 3, round: 0 },
+			{ ts: 6, type: "ci_fix", round: 1, findings: 1 },
+			{ ts: 7, type: "ci", status: "pass", checks: 3, total: 3 },
+			{ ts: 8, type: "run_end", passed: true },
+		]
+			.map((e) => JSON.stringify(e))
+			.join("\n"),
+	);
+	assert.equal(s.ci.seen, true);
+	assert.equal(s.stages.ci, "done");
+	assert.equal(s.ci.total, 3);
+	assert.equal(s.ci.fixes, 1);
+	const lines = renderCard(s, plain);
+	assert.ok(lines.some((l) => l.includes("CI") && l.includes("3/3 checks")));
+	assert.match(summarize(s), /ci: done \(3\/3 checks\)/);
+});
+
+test("a red CI gate fails the run at the CI stage", () => {
+	const s = initialState();
+	applyLines(
+		s,
+		[
+			{ ts: 1, type: "run_start", branch: "feat/x", classification: "backend", files: ["a.py"] },
+			{ ts: 2, type: "intent", source: "supplied", text: "x" },
+			{ ts: 3, type: "lint", status: "skip" },
+			{ ts: 4, type: "pr", status: "open", url: "https://github.com/x/y/pull/7" },
+			{ ts: 5, type: "ci", status: "fail", checks: 2, total: 3 },
+			{ ts: 6, type: "run_end", passed: false },
+		]
+			.map((e) => JSON.stringify(e))
+			.join("\n"),
+	);
+	assert.equal(s.passed, false);
+	assert.equal(s.stages.ci, "fail");
+	assert.equal(s.failedStage, "ci");
+	assert.match(statusLine(s), /failed at CI/);
+});
+
 test("statusLine reflects running stage, pass, and fail", () => {
 	const running = initialState();
 	applyLines(
