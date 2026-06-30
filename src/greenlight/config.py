@@ -63,6 +63,21 @@ class Config:
     frontend_url: str
     frontend_server_cmd: str
     frontend_server_ready_path: str
+    # CI monitoring (post-PR). The real remote CI is the authoritative test
+    # signal — it has installed deps, services, and caching the throwaway
+    # worktree can't reproduce. When enabled, the gate polls the PR's check
+    # rollup after opening it, auto-fixes failures (intent-preserving) up to
+    # ci_max_fix_rounds, and only reports green once CI is green. GitHub only.
+    ci_enabled: bool
+    ci_provider: str  # "github"
+    # Idle timeout (s) for the whole CI watch, independent of run_timeout. Each
+    # auto-fix re-arms it. 0 = wait forever (until CI settles).
+    ci_timeout: int
+    # Intent-preserving auto-fix attempts on CI failure before giving up.
+    ci_max_fix_rounds: int
+    # Only gate on these check names (matched against check/workflow name).
+    # Empty = gate on every check the PR reports.
+    ci_required_checks: list[str]
     # Format/lint commands. Run before review; failures here are auto-fixable.
     format_cmd: str
     lint_cmd: str
@@ -116,6 +131,11 @@ def default_config() -> Config:
         frontend_url="http://localhost:3000",
         frontend_server_cmd="",
         frontend_server_ready_path="/",
+        ci_enabled=False,
+        ci_provider="github",
+        ci_timeout=2700,
+        ci_max_fix_rounds=2,
+        ci_required_checks=[],
         format_cmd="",
         lint_cmd="",
         evidence_dir=".greenlight/evidence",
@@ -180,6 +200,14 @@ def load(repo_root: str | Path) -> Config:
     cfg.frontend_server_ready_path = str(
         fe.get("ready_path", cfg.frontend_server_ready_path)
     )
+
+    ci = data.get("ci", {})
+    cfg.ci_enabled = bool(ci.get("enabled", cfg.ci_enabled))
+    cfg.ci_provider = str(ci.get("provider", cfg.ci_provider))
+    cfg.ci_timeout = int(ci.get("timeout", cfg.ci_timeout))
+    cfg.ci_max_fix_rounds = int(ci.get("max_fix_rounds", cfg.ci_max_fix_rounds))
+    if "required_checks" in ci:
+        cfg.ci_required_checks = [str(c) for c in ci["required_checks"]]
 
     checks = data.get("checks", {})
     cfg.format_cmd = str(checks.get("format_cmd", cfg.format_cmd))

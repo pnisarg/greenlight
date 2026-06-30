@@ -12,6 +12,7 @@ from .agent import Agent
 from .config import Config
 from .util import Deadline
 from .diff import classify
+from .steps import ci as ci_step
 from .steps import intent as intent_step
 from .steps import lint as lint_step
 from .steps import pr as pr_step
@@ -150,6 +151,21 @@ def run_pipeline(
     pr_res = pr_step.run_step(work_dir, cfg, branch, intent, results, default_branch)
     results.append(pr_res)
     events.emit("pr", status=_pr_status(pr_res), url=pr_res.summary)
+
+    # CI monitoring (opt-in): the real remote CI is the authoritative test
+    # signal. Poll the PR's checks, auto-fix failures, and only declare green
+    # once CI is green. Runs after the PR is open (so checks have fired) and
+    # re-uses `forward` to re-push intent-preserving fixes.
+    if cfg.ci_enabled:
+        ci_res = ci_step.run_step(
+            work_dir, cfg, branch, intent, commit, forward,
+            pr_skipped=pr_res.skipped,
+        )
+        results.append(ci_res)
+        if not ci_res.passed and not ci_res.skipped:
+            fail("ci gate failed")
+            events.emit("run_end", passed=False)
+            return False
 
     ok("all gates green")
     events.emit("run_end", passed=True)

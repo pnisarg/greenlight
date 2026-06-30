@@ -37,6 +37,8 @@ the real pipeline stages:
   fix           {round, findings}
   verify        {target: "backend"|"frontend", status, evidence}
   pr            {status: "open"|"exists"|"skip"|"fail", url}
+  ci            {status: "running"|"pass"|"fail"|"skip", checks, total, round}
+  ci_fix        {round, findings}
   run_end       {passed}
 """
 from __future__ import annotations

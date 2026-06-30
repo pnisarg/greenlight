@@ -502,6 +502,18 @@ url = "http://localhost:3000"
 # server_cmd = "npm run dev"
 ready_path = "/"
 
+[ci]
+# Post-PR CI monitoring. When enabled, greenlight polls the PR's checks after
+# opening it, auto-fixes failures (intent-preserving) up to max_fix_rounds, and
+# only reports green once the *real* remote CI is green. This is the
+# authoritative test signal for repos whose tests need deps/services the
+# throwaway worktree can't provide. Requires `gh`. GitHub only.
+enabled = false
+# provider = "github"
+# timeout = 2700          # idle seconds before giving up on CI (0 = wait forever)
+# max_fix_rounds = 2      # intent-preserving auto-fix attempts on CI failure
+# required_checks = []    # only gate on these check names; empty = all checks
+
 [routing]
 # Override which paths count as frontend/backend if the defaults don't fit.
 # frontend = ["*.tsx", "frontend/*"]
