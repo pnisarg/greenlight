@@ -164,7 +164,8 @@ handoff contract — any other UI can consume it the same way.
 [greenlight]
 max_review_rounds = 3
 push_target = "origin"
-# model = "anthropic/claude-sonnet-4"     # pi model; empty = pi default
+# model = "anthropic/claude-sonnet-4"     # pi model for all steps; empty = pi default
+# review_model = "openai-codex/gpt-5.5:high"  # dedicated model for reviewers (":high" = reasoning effort)
 evidence_dir = ".greenlight/evidence"
 
 [checks]
@@ -177,6 +178,8 @@ evidence_dir = ".greenlight/evidence"
 name = "brutal"
 focus = "Brutally honest senior review. Real bugs, broken edge cases, race conditions, bad error handling, needless complexity. No style nits."
 blocking_severity = "warning"   # error | warning | info
+# Reviewers run in parallel (each is its own read-only pi process), so a round
+# costs the slowest reviewer's wall time, not the sum.
 
 [[reviewers]]
 name = "security"
@@ -220,7 +223,7 @@ enabled = false
 |------|--------------|------|
 | **intent** | Uses supplied intent, else summarizes the diff once. Treated as ground truth. | — |
 | **format/lint** | Runs configured format/lint; commits formatter output; bounded non-functional auto-fix for lint errors. | lint must pass |
-| **review loop** | N configurable read-only reviewers → intent-preserving fix → re-review, up to `max_review_rounds`. | no blocking findings remain |
+| **review loop** | N configurable read-only reviewers (run in parallel) → intent-preserving fix → re-review, up to `max_review_rounds`. | no blocking findings remain |
 | **verify** | Backend tests and/or frontend screenshot based on diff classification; evidence committed. | tests pass / server boots |
 | **PR** | Composes intent + evidence into the PR body, opens via `gh`. Idempotent. | — |
 | **ci** (opt-in) | Polls the PR's real CI checks; on failure pulls `gh run --log-failed`, applies an intent-preserving fix, re-pushes, re-polls (≤ `max_fix_rounds`). | CI green |

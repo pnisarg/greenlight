@@ -13,6 +13,7 @@ def test_load_missing_returns_defaults(tmp_path: Path):
     cfg = config.load(tmp_path)
     assert cfg.max_review_rounds == 3
     assert cfg.push_target == "origin"
+    assert cfg.review_model == ""
 
 
 def test_load_overrides(tmp_path: Path):
@@ -21,6 +22,7 @@ def test_load_overrides(tmp_path: Path):
 [greenlight]
 max_review_rounds = 5
 model = "anthropic/claude-sonnet-4"
+review_model = "openai-codex/gpt-5.5:high"
 
 [checks]
 lint_cmd = "ruff check ."
@@ -45,6 +47,7 @@ backend = ["*.py"]
     cfg = config.load(tmp_path)
     assert cfg.max_review_rounds == 5
     assert cfg.model == "anthropic/claude-sonnet-4"
+    assert cfg.review_model == "openai-codex/gpt-5.5:high"
     assert cfg.lint_cmd == "ruff check ."
     assert [r.name for r in cfg.reviewers] == ["perf"]
     assert cfg.reviewers[0].blocking_severity == "error"

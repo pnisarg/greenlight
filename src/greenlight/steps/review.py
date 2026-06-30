@@ -13,6 +13,7 @@ intent stable.
 from __future__ import annotations
 
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
 from .. import events
@@ -146,30 +147,57 @@ def _inconclusive_finding(reviewer: str, reason: str) -> Finding:
     )
 
 
+def _review_with_retry(
+    agent: Agent, work_dir: str, r: Reviewer, base: str, head: str, intent: str
+) -> _Verdict:
+    """Run one reviewer with a single transient-blip retry.
+
+    Retries once to absorb a transient gateway blip — but not a hard timeout,
+    which is a hung reviewer a retry only doubles the latency of (notably in the
+    uncapped run_timeout=0 path, where the Deadline doesn't clamp it).
+    """
+    v = _review_once(agent, work_dir, r, base, head, intent)
+    if v.findings is None and not v.timed_out:
+        warn(f"  {r.name}: {v.reason}; retrying once")
+        v = _review_once(agent, work_dir, r, base, head, intent)
+    return v
+
+
 def _run_reviewers(
     agent: Agent, work_dir: str, cfg: Config, base: str, head: str, intent: str, rnd: int
 ) -> tuple[list[Finding], list[str]]:
-    """Run every enabled reviewer once. Returns (findings, inconclusive_names).
+    """Run every enabled reviewer concurrently. Returns (findings, inconclusive).
 
-    A reviewer that yields no usable verdict is retried once; if it still fails it
-    is recorded as inconclusive (with a synthesized blocking finding for the card
-    and review-log) so the caller can fail the gate closed instead of shipping an
-    un-reviewed change.
+    Each reviewer is its own read-only pi subprocess, so they fan out across a
+    thread pool and the round costs the slowest reviewer's wall time instead of
+    the sum. A reviewer that yields no usable verdict is retried once; if it
+    still fails it is recorded as inconclusive (with a synthesized blocking
+    finding for the card and review-log) so the caller can fail the gate closed
+    instead of shipping an un-reviewed change.
     """
     findings: list[Finding] = []
     inconclusive: list[str] = []
-    for r in cfg.reviewers:
-        if not r.enabled:
-            continue
+    enabled = [r for r in cfg.reviewers if r.enabled]
+    # Emit all start events up front so the live card shows every reviewer as
+    # running at once, then fan out the work.
+    for r in enabled:
         info(f"reviewer: {r.name}")
         events.emit("reviewer", name=r.name, round=rnd, findings=None, blocking=None)
-        v = _review_once(agent, work_dir, r, base, head, intent)
-        # Retry once to absorb a transient gateway blip — but not a hard timeout,
-        # which is a hung reviewer a retry only doubles the latency of (notably in
-        # the uncapped run_timeout=0 path, where the Deadline doesn't clamp it).
-        if v.findings is None and not v.timed_out:
-            warn(f"  {r.name}: {v.reason}; retrying once")
-            v = _review_once(agent, work_dir, r, base, head, intent)
+
+    verdicts: dict[str, _Verdict] = {}
+    with ThreadPoolExecutor(max_workers=len(enabled) or 1) as ex:
+        futures = {
+            ex.submit(_review_with_retry, agent, work_dir, r, base, head, intent): r
+            for r in enabled
+        }
+        for fut in as_completed(futures):
+            r = futures[fut]
+            verdicts[r.name] = fut.result()
+
+    # Aggregate in config order so findings and the review-log stay deterministic
+    # regardless of which reviewer finished first.
+    for r in enabled:
+        v = verdicts[r.name]
         if v.findings is None:
             warn(f"  {r.name}: {v.reason}; failing the gate closed")
             synth = _inconclusive_finding(r.name, v.reason)
@@ -186,7 +214,7 @@ def _run_reviewers(
             continue
         rf = v.findings
         blocking = [f for f in rf if f.blocks(r.blocking_severity)]
-        info(f"  {len(rf)} findings ({len(blocking)} blocking)")
+        info(f"  {r.name}: {len(rf)} findings ({len(blocking)} blocking)")
         events.emit(
             "reviewer",
             name=r.name,
@@ -197,6 +225,17 @@ def _run_reviewers(
         )
         findings.extend(rf)
     return findings, inconclusive
+
+
+def _review_agent(agent: Agent, cfg: Config) -> Agent:
+    """Reviewers can run on a dedicated model (e.g. a stronger reasoning model)
+    without changing the model used for intent/fix/CI agents. Falls back to the
+    run's agent when no review_model is set or it matches the run's model.
+    """
+    model = (cfg.review_model or "").strip()
+    if not model or model == agent.model:
+        return agent
+    return Agent(model=model, extra_args=agent.extra_args, deadline=agent.deadline)
 
 
 def _finding_event(f: Finding, blocks: bool) -> dict:
@@ -250,6 +289,8 @@ def run_step(
     """Run the review->fix loop. commit_fn(message) commits the worktree."""
     step("review loop")
     all_findings: list[Finding] = []
+    # Reviewers may run on a dedicated model; the fix agent keeps the run's model.
+    review_agent = _review_agent(agent, cfg)
 
     deadline = getattr(agent, "deadline", None)
     for rnd in range(1, cfg.max_review_rounds + 1):
@@ -263,7 +304,9 @@ def run_step(
             )
         info(f"round {rnd}/{cfg.max_review_rounds}")
         events.emit("review_round", round=rnd, max_rounds=cfg.max_review_rounds)
-        findings, inconclusive = _run_reviewers(agent, work_dir, cfg, base, head, intent, rnd)
+        findings, inconclusive = _run_reviewers(
+            review_agent, work_dir, cfg, base, head, intent, rnd
+        )
         all_findings = findings
         if inconclusive:
             # Infrastructure failure, not a code defect: the fix agent can't
