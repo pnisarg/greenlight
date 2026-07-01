@@ -184,20 +184,21 @@ def _run_reviewers(
         info(f"reviewer: {r.name}")
         events.emit("reviewer", name=r.name, round=rnd, findings=None, blocking=None)
 
-    verdicts: dict[str, _Verdict] = {}
+    # Index-keyed (not name-keyed) so duplicate reviewer names can't collide and
+    # silently drop one reviewer's verdict.
+    verdicts: list[_Verdict | None] = [None] * len(enabled)
     with ThreadPoolExecutor(max_workers=len(enabled) or 1) as ex:
         futures = {
-            ex.submit(_review_with_retry, agent, work_dir, r, base, head, intent): r
-            for r in enabled
+            ex.submit(_review_with_retry, agent, work_dir, r, base, head, intent): i
+            for i, r in enumerate(enabled)
         }
         for fut in as_completed(futures):
-            r = futures[fut]
-            verdicts[r.name] = fut.result()
+            verdicts[futures[fut]] = fut.result()
 
     # Aggregate in config order so findings and the review-log stay deterministic
     # regardless of which reviewer finished first.
-    for r in enabled:
-        v = verdicts[r.name]
+    for r, v in zip(enabled, verdicts):
+        assert v is not None  # every future was awaited above
         if v.findings is None:
             warn(f"  {r.name}: {v.reason}; failing the gate closed")
             synth = _inconclusive_finding(r.name, v.reason)

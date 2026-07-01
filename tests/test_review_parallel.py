@@ -88,6 +88,32 @@ def test_findings_are_aggregated_in_config_order(tmp_path):
     assert [f.reviewer for f in findings] == ["a", "b"]
 
 
+def test_duplicate_reviewer_names_do_not_collide(tmp_path):
+    """Two reviewers sharing a name must both be aggregated, not overwritten."""
+
+    class _NamedAgent:
+        model = ""
+
+        def run(self, prompt, *a, **k) -> AgentResult:
+            tag = "one" if "focus-one" in prompt else "two"
+            payload = {"findings": [
+                {"severity": "warning", "file": f"{tag}.py", "line": 1,
+                 "description": tag}
+            ]}
+            return AgentResult(text="```json\n" + json.dumps(payload) + "\n```", code=0)
+
+    cfg = default_config()
+    cfg.reviewers = [
+        Reviewer(name="dup", focus="focus-one"),
+        Reviewer(name="dup", focus="focus-two"),
+    ]
+    findings, inconclusive = review._run_reviewers(
+        _NamedAgent(), str(tmp_path), cfg, "B", "H", "i", 1
+    )
+    assert inconclusive == []
+    assert {f.description for f in findings} == {"one", "two"}
+
+
 def test_review_agent_uses_review_model_when_set(monkeypatch):
     cfg = default_config()
     cfg.model = "base-model"
