@@ -467,7 +467,8 @@ _DEFAULT_CONFIG_TOML = """# greenlight configuration. See README for all options
 max_review_rounds = 3
 run_timeout = 1200   # wall-clock budget (s) for the whole run; 0 = uncapped
 push_target = "origin"
-# model = "anthropic/claude-sonnet-4"   # pi model; empty = pi default
+# model = "anthropic/claude-sonnet-4"   # pi model for all steps; empty = pi default
+# review_model = "openai-codex/gpt-5.5:high"  # model for all reviewers; empty = use `model`
 evidence_dir = ".greenlight/evidence"
 
 [checks]
@@ -485,6 +486,7 @@ blocking_severity = "warning"
 name = "security"
 focus = "Security review: injection, auth gaps, secret leakage, unsafe deserialization, SSRF, path traversal, missing validation."
 blocking_severity = "warning"
+# model = "openai-codex/gpt-5.5:high"    # run just this reviewer on another model
 
 # [[reviewers]]
 # name = "house-style"

@@ -178,18 +178,39 @@ def _run_reviewers(
     findings: list[Finding] = []
     inconclusive: list[str] = []
     enabled = [r for r in cfg.reviewers if r.enabled]
+    run_model = getattr(agent, "model", "")
+    # Each reviewer may run on its own model (falling back to review_model, then
+    # the run model); build one pi wrapper per distinct model, reusing the run
+    # agent for reviewers that inherit its model.
+    agents = _review_agents(agent, cfg)
     # Emit all start events up front so the live card shows every reviewer as
     # running at once, then fan out the work.
     for r in enabled:
-        info(f"reviewer: {r.name}")
-        events.emit("reviewer", name=r.name, round=rnd, findings=None, blocking=None)
+        model = _effective_model(cfg, r, run_model)
+        info(f"reviewer: {r.name}" + (f" [{model}]" if model else ""))
+        events.emit(
+            "reviewer",
+            name=r.name,
+            round=rnd,
+            findings=None,
+            blocking=None,
+            model=model or None,
+        )
 
     # Index-keyed (not name-keyed) so duplicate reviewer names can't collide and
     # silently drop one reviewer's verdict.
     verdicts: list[_Verdict | None] = [None] * len(enabled)
     with ThreadPoolExecutor(max_workers=len(enabled) or 1) as ex:
         futures = {
-            ex.submit(_review_with_retry, agent, work_dir, r, base, head, intent): i
+            ex.submit(
+                _review_with_retry,
+                agents[_effective_model(cfg, r, run_model)],
+                work_dir,
+                r,
+                base,
+                head,
+                intent,
+            ): i
             for i, r in enumerate(enabled)
         }
         for fut in as_completed(futures):
@@ -228,15 +249,48 @@ def _run_reviewers(
     return findings, inconclusive
 
 
-def _review_agent(agent: Agent, cfg: Config) -> Agent:
-    """Reviewers can run on a dedicated model (e.g. a stronger reasoning model)
-    without changing the model used for intent/fix/CI agents. Falls back to the
-    run's agent when no review_model is set or it matches the run's model.
+def _effective_model(cfg: Config, reviewer: Reviewer, run_model: str) -> str:
+    """The pi model one reviewer runs on.
+
+    Precedence: the reviewer's own `model`, then the step-level `review_model`,
+    then the run's `model`. Empty at every level means "let pi pick its default"
+    — so a reviewer inherits the coding agent's model unless it (or the review
+    step) explicitly overrides it.
     """
-    model = (cfg.review_model or "").strip()
-    if not model or model == agent.model:
-        return agent
-    return Agent(model=model, extra_args=agent.extra_args, deadline=agent.deadline)
+    for candidate in (reviewer.model, cfg.review_model, run_model):
+        m = (candidate or "").strip()
+        if m:
+            return m
+    return ""
+
+
+def _review_agents(agent: Agent, cfg: Config) -> dict[str, Agent]:
+    """One Agent per distinct effective reviewer model, keyed by model string.
+
+    Reviewers can each run on their own model (e.g. GPT-5.5 for security while
+    the coding/fix agent stays on Claude Opus) without changing the model used
+    for intent/fix/CI. The run agent is reused whenever a reviewer's effective
+    model matches it, so we only spawn an extra pi wrapper for reviewers that
+    actually opt into a different model.
+    """
+    run_model = getattr(agent, "model", "")
+    agents: dict[str, Agent] = {}
+    for r in cfg.reviewers:
+        if not r.enabled:
+            continue
+        model = _effective_model(cfg, r, run_model)
+        if model in agents:
+            continue
+        agents[model] = (
+            agent
+            if model == run_model
+            else Agent(
+                model=model,
+                extra_args=getattr(agent, "extra_args", []),
+                deadline=getattr(agent, "deadline", None),
+            )
+        )
+    return agents
 
 
 def _finding_event(f: Finding, blocks: bool) -> dict:
@@ -290,8 +344,9 @@ def run_step(
     """Run the review->fix loop. commit_fn(message) commits the worktree."""
     step("review loop")
     all_findings: list[Finding] = []
-    # Reviewers may run on a dedicated model; the fix agent keeps the run's model.
-    review_agent = _review_agent(agent, cfg)
+    # Reviewers may each run on their own model (see _review_agents); the fix
+    # agent always keeps the run's model, so fixes never drift off the coding
+    # agent's model.
 
     deadline = getattr(agent, "deadline", None)
     for rnd in range(1, cfg.max_review_rounds + 1):
@@ -306,7 +361,7 @@ def run_step(
         info(f"round {rnd}/{cfg.max_review_rounds}")
         events.emit("review_round", round=rnd, max_rounds=cfg.max_review_rounds)
         findings, inconclusive = _run_reviewers(
-            review_agent, work_dir, cfg, base, head, intent, rnd
+            agent, work_dir, cfg, base, head, intent, rnd
         )
         all_findings = findings
         if inconclusive:

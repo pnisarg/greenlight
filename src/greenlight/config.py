@@ -21,6 +21,10 @@ class Reviewer:
     # or an inline focus prompt. At least one should be set.
     skill: str | None = None
     focus: str = ""
+    # pi model this reviewer runs on (e.g. "openai-codex/gpt-5.5:high"). Empty =
+    # inherit the run's `review_model`, then the run `model`, then pi's default.
+    # Lets one reviewer run on a different model than the coding agent.
+    model: str = ""
     # Findings at or above this severity block the gate. error|warning|info.
     blocking_severity: str = "warning"
     enabled: bool = True
@@ -95,7 +99,8 @@ class Config:
     model: str
     # Optional dedicated model for the review step's reviewers (empty = use
     # `model`). Lets reviewers run on a stronger reasoning model without
-    # changing the model used for intent/fix/CI agents.
+    # changing the model used for intent/fix/CI agents. A per-reviewer
+    # `Reviewer.model` overrides this for that reviewer.
     review_model: str
     push_target: str  # remote the gate forwards to on pass
 
@@ -159,6 +164,7 @@ def _coerce_reviewers(raw: list[dict]) -> list[Reviewer]:
                 name=str(r["name"]),
                 skill=r.get("skill"),
                 focus=str(r.get("focus", "")),
+                model=str(r.get("model", "")),
                 blocking_severity=str(r.get("blocking_severity", "warning")),
                 enabled=bool(r.get("enabled", True)),
             )

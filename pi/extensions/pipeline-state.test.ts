@@ -201,6 +201,27 @@ test("expanded mode lists blocking findings under the reviewer", () => {
 	assert.ok(lines.some((l) => l.startsWith("      ") && /SQL injection/.test(l)));
 });
 
+test("reviewer model is parsed and rendered under the reviewer", () => {
+	const s = initialState();
+	applyLines(
+		s,
+		[
+			{ ts: 1, type: "run_start", branch: "b", classification: "backend", files: ["a.py"] },
+			{ ts: 2, type: "review_round", round: 1, max_rounds: 3 },
+			{ ts: 3, type: "reviewer", name: "security", round: 1, findings: null, blocking: null, model: "openai-codex/gpt-5.5:high" },
+			{ ts: 4, type: "reviewer", name: "brutal", round: 1, findings: null, blocking: null, model: null },
+		]
+			.map((e) => JSON.stringify(e))
+			.join("\n"),
+	);
+	const sec = s.review.reviewers.find((r) => r.name === "security");
+	assert.equal(sec?.model, "openai-codex/gpt-5.5:high");
+	const brutal = s.review.reviewers.find((r) => r.name === "brutal");
+	assert.equal(brutal?.model, ""); // null model -> pi default, not shown
+	const lines = renderCard(s, plain);
+	assert.ok(lines.some((l) => /security/.test(l) && /openai-codex\/gpt-5\.5:high/.test(l)));
+});
+
 test("stageElapsed bounds a stage by the next stage's start", () => {
 	const s = initialState();
 	applyLines(s, FAILING);

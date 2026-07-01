@@ -65,6 +65,37 @@ def test_reviewer_event_includes_finding_items(monkeypatch, tmp_path):
     assert items[1]["line"] is None
 
 
+def test_reviewer_started_event_carries_effective_model(monkeypatch, tmp_path):
+    path = tmp_path / "events.jsonl"
+    monkeypatch.setenv("GREENLIGHT_EVENTS", str(path))
+
+    class _ModelAgent:
+        def __init__(self, model="", extra_args=None, deadline=None):
+            self.model = model
+
+        def run(self, *a, **k) -> AgentResult:
+            return AgentResult(text='```json\n{"findings": []}\n```', code=0)
+
+    monkeypatch.setattr(review, "Agent", _ModelAgent)
+
+    cfg = default_config()
+    cfg.model = ""  # run/global default = pi default
+    cfg.reviewers = [
+        Reviewer(name="sec", focus="x", model="openai-codex/gpt-5.5:high"),
+        Reviewer(name="brutal", focus="y"),  # inherits pi default
+    ]
+    review._run_reviewers(_ModelAgent(model=""), str(tmp_path), cfg, "B", "H", "i", 1)
+
+    recs = [json.loads(line) for line in path.read_text().splitlines()]
+    started = {
+        r["name"]: r
+        for r in recs
+        if r["type"] == "reviewer" and r["findings"] is None
+    }
+    assert started["sec"]["model"] == "openai-codex/gpt-5.5:high"
+    assert started["brutal"]["model"] is None  # pi default -> null, not a name
+
+
 def test_started_event_has_no_items(monkeypatch, tmp_path):
     path = tmp_path / "events.jsonl"
     monkeypatch.setenv("GREENLIGHT_EVENTS", str(path))

@@ -34,6 +34,8 @@ export interface ReviewerState {
 	findings: number | null;
 	blocking: number | null;
 	items: Finding[];
+	/** Effective pi model this reviewer ran on; "" when pi's default is used. */
+	model: string;
 }
 
 export interface PipelineState {
@@ -143,13 +145,15 @@ export function reduce(state: PipelineState, ev: GreenlightEvent): PipelineState
 		}
 		case "reviewer": {
 			const name = String(ev.name ?? "");
+			const model = ev.model == null ? "" : String(ev.model);
 			const findings = ev.findings == null ? null : Number(ev.findings);
 			const blocking = ev.blocking == null ? null : Number(ev.blocking);
 			let r = state.review.reviewers.find((x) => x.name === name);
 			if (!r) {
-				r = { name, status: "running", findings: null, blocking: null, items: [] };
+				r = { name, status: "running", findings: null, blocking: null, items: [], model: "" };
 				state.review.reviewers.push(r);
 			}
+			if (model) r.model = model;
 			// findings == null marks "started"; a later event with counts marks "done".
 			if (findings == null) {
 				r.status = "running";
@@ -545,6 +549,7 @@ export function renderCard(state: PipelineState, p: Painter = plain, opts: Rende
 				const rGlyph = r.status === "running" && opts.spinner ? opts.spinner : GLYPH[r.status];
 				const g = paint(p, COLOR[r.status], rGlyph);
 				let sub = `    ${g} ${r.name.padEnd(10)}`;
+				if (r.model) sub += " " + p.dim(r.model);
 				if (r.status === "done" && r.findings != null) {
 					const blk = r.blocking ? p.fail(`${r.blocking} blocking`) : p.dim("0 blocking");
 					sub += " " + p.dim(`${r.findings} finding${r.findings === 1 ? "" : "s"} · `) + blk;
