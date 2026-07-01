@@ -93,6 +93,10 @@ class Config:
     run_timeout: int
     # The agent model passed to pi (empty = pi default).
     model: str
+    # Optional dedicated model for the review step's reviewers (empty = use
+    # `model`). Lets reviewers run on a stronger reasoning model without
+    # changing the model used for intent/fix/CI agents.
+    review_model: str
     push_target: str  # remote the gate forwards to on pass
 
 
@@ -142,6 +146,7 @@ def default_config() -> Config:
         max_review_rounds=3,
         run_timeout=1200,
         model="",
+        review_model="",
         push_target="origin",
     )
 
@@ -218,5 +223,6 @@ def load(repo_root: str | Path) -> Config:
     cfg.max_review_rounds = int(gen.get("max_review_rounds", cfg.max_review_rounds))
     cfg.run_timeout = int(gen.get("run_timeout", cfg.run_timeout))
     cfg.model = str(gen.get("model", cfg.model))
+    cfg.review_model = str(gen.get("review_model", cfg.review_model))
     cfg.push_target = str(gen.get("push_target", cfg.push_target))
     return cfg
