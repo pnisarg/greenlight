@@ -15,7 +15,9 @@ evidence_dir = ".greenlight/evidence"
 # reformat would swamp every diff). `ruff check` flags real errors.
 lint_cmd = "ruff check ."
 
-# Reviewers: each runs as an independent read-only pi agent.
+# Reviewers: each runs as an independent read-only pi agent. Add `model = "..."`
+# to a reviewer to run it on a different model than the run's `model`
+# (precedence: reviewer model > review_model > model > pi default).
 [[reviewers]]
 name = "brutal"
 focus = "Brutally honest senior review. Real bugs, broken edge cases, race conditions, bad error handling, needless complexity. No style nits (a lint step handles those)."

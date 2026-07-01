@@ -165,7 +165,7 @@ handoff contract — any other UI can consume it the same way.
 max_review_rounds = 3
 push_target = "origin"
 # model = "anthropic/claude-sonnet-4"     # pi model for all steps; empty = pi default
-# review_model = "openai-codex/gpt-5.5:high"  # dedicated model for reviewers (":high" = reasoning effort)
+# review_model = "openai-codex/gpt-5.5:high"  # default model for all reviewers (":high" = reasoning effort)
 evidence_dir = ".greenlight/evidence"
 
 [checks]
@@ -184,6 +184,10 @@ blocking_severity = "warning"   # error | warning | info
 [[reviewers]]
 name = "security"
 focus = "Injection, auth gaps, secret leakage, unsafe deserialization, SSRF, path traversal, missing validation."
+# Per-reviewer model. Precedence: this `model` > `review_model` > `model` > pi
+# default — so you can run security on GPT-5.5 while the coding/fix agent stays
+# on Claude Opus. Omit to inherit the run's model.
+# model = "openai-codex/gpt-5.5:high"
 
 # [[reviewers]]
 # name = "house-style"

@@ -36,6 +36,7 @@ class Reviewer:
     status: str = "running"
     findings: int | None = None
     blocking: int | None = None
+    model: str = ""  # effective pi model, when reported by the event stream
 
 
 @dataclass
@@ -126,6 +127,9 @@ def reduce(state: State, ev: dict) -> State:
         state.max_rounds = int(ev.get("max_rounds", 0))
     elif t == "reviewer":
         r = _reviewer(state, str(ev.get("name", "")))
+        model = ev.get("model")
+        if model:
+            r.model = str(model)
         findings = ev.get("findings")
         if findings is None:
             r.status = "running"
@@ -387,6 +391,8 @@ def render_card(state: State, color: bool = True) -> list[str]:
             for r in state.reviewers:
                 g = _c(_GLYPH[r.status], _STATUS_COLOR[r.status], color)
                 sub = f"      {g} {r.name.ljust(10)}"
+                if r.model:
+                    sub += " " + _c(r.model, _DIM, color)
                 if r.status == "done" and r.findings is not None:
                     plural = "" if r.findings == 1 else "s"
                     sub += " " + _c(f"{r.findings} finding{plural}, {r.blocking} blocking", _DIM, color)

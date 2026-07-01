@@ -55,3 +55,24 @@ backend = ["*.py"]
     assert cfg.frontend_server_cmd == "npm run dev"
     assert cfg.frontend_url == "http://localhost:5173"
     assert cfg.routing.backend == ["*.py"]
+    # A reviewer with no explicit model inherits the run/review model.
+    assert cfg.reviewers[0].model == ""
+
+
+def test_load_per_reviewer_model(tmp_path: Path):
+    (tmp_path / config.CONFIG_NAME).write_text(
+        """
+[[reviewers]]
+name = "security"
+focus = "security"
+model = "openai-codex/gpt-5.5:high"
+
+[[reviewers]]
+name = "brutal"
+focus = "bugs"
+"""
+    )
+    cfg = config.load(tmp_path)
+    by_name = {r.name: r for r in cfg.reviewers}
+    assert by_name["security"].model == "openai-codex/gpt-5.5:high"
+    assert by_name["brutal"].model == ""  # inherits the run/review model

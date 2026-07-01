@@ -114,16 +114,45 @@ def test_duplicate_reviewer_names_do_not_collide(tmp_path):
     assert {f.description for f in findings} == {"one", "two"}
 
 
-def test_review_agent_uses_review_model_when_set(monkeypatch):
+def test_effective_model_precedence():
+    """reviewer.model > review_model > run model > pi default ("")."""
+    cfg = default_config()
+    cfg.model = "run-model"
+    cfg.review_model = "review-model"
+
+    # Per-reviewer model wins over everything.
+    r_own = Reviewer(name="a", focus="x", model="reviewer-model")
+    assert review._effective_model(cfg, r_own, cfg.model) == "reviewer-model"
+
+    # No per-reviewer model -> fall back to review_model.
+    r_bare = Reviewer(name="b", focus="y")
+    assert review._effective_model(cfg, r_bare, cfg.model) == "review-model"
+
+    # No review_model -> inherit the run model.
+    cfg.review_model = ""
+    assert review._effective_model(cfg, r_bare, cfg.model) == "run-model"
+
+    # Nothing set anywhere -> pi default (empty string).
+    cfg.model = ""
+    assert review._effective_model(cfg, r_bare, "") == ""
+
+
+def test_review_agents_builds_one_wrapper_per_distinct_model(monkeypatch):
     cfg = default_config()
     cfg.model = "base-model"
-    cfg.review_model = "openai-codex/gpt-5.5:high"
+    cfg.review_model = ""
+    cfg.reviewers = [
+        Reviewer(name="a", focus="x", model="openai-codex/gpt-5.5:high"),
+        Reviewer(name="b", focus="y"),  # inherits base-model
+        Reviewer(name="c", focus="z", model="openai-codex/gpt-5.5:high"),  # dedup
+        Reviewer(name="d", focus="w", model="x", enabled=False),  # skipped
+    ]
 
-    created = {}
+    created: list[str] = []
 
     class _FakeAgent:
         def __init__(self, model="", extra_args=None, deadline=None):
-            created["model"] = model
+            created.append(model)
             self.model = model
             self.extra_args = extra_args or []
             self.deadline = deadline
@@ -131,17 +160,74 @@ def test_review_agent_uses_review_model_when_set(monkeypatch):
     monkeypatch.setattr(review, "Agent", _FakeAgent)
 
     base = _FakeAgent(model="base-model")
-    out = review._review_agent(base, cfg)
-    assert out is not base
-    assert created["model"] == "openai-codex/gpt-5.5:high"
+    created.clear()
+    agents = review._review_agents(base, cfg)
+
+    # "b" inherits base-model and reuses the run agent (no new wrapper).
+    assert agents["base-model"] is base
+    # "a"/"c" share one wrapper on the overridden model; "d" is disabled/skipped.
+    assert agents["openai-codex/gpt-5.5:high"].model == "openai-codex/gpt-5.5:high"
+    assert created == ["openai-codex/gpt-5.5:high"]
 
 
-def test_review_agent_falls_back_when_unset():
+def test_run_reviewers_dispatches_each_reviewer_to_its_model(monkeypatch, tmp_path):
+    """Each reviewer's findings must come from an agent carrying its own model."""
     cfg = default_config()
+    cfg.model = "base-model"
     cfg.review_model = ""
+    cfg.reviewers = [
+        Reviewer(name="a", focus="x", model="model-A"),
+        Reviewer(name="b", focus="y", model="model-B"),
+        Reviewer(name="c", focus="z"),  # inherits base-model
+    ]
 
-    class _Any:
-        model = "base-model"
+    class _ModelEchoAgent:
+        def __init__(self, model="", extra_args=None, deadline=None):
+            self.model = model
+            self.extra_args = extra_args or []
+            self.deadline = deadline
 
-    base = _Any()
-    assert review._review_agent(base, cfg) is base
+        def run(self, prompt, *a, **k) -> AgentResult:
+            payload = {
+                "findings": [
+                    {"severity": "warning", "file": "f.py", "line": 1,
+                     "description": self.model}
+                ]
+            }
+            return AgentResult(text="```json\n" + json.dumps(payload) + "\n```", code=0)
+
+    monkeypatch.setattr(review, "Agent", _ModelEchoAgent)
+    base = _ModelEchoAgent(model="base-model")
+    findings, inconclusive = review._run_reviewers(
+        base, str(tmp_path), cfg, "B", "H", "i", 1
+    )
+    assert inconclusive == []
+    assert {f.reviewer: f.description for f in findings} == {
+        "a": "model-A",
+        "b": "model-B",
+        "c": "base-model",
+    }
+
+
+def test_review_model_still_applies_when_no_per_reviewer_model(monkeypatch):
+    cfg = default_config()
+    cfg.model = "base-model"
+    cfg.review_model = "review-model"
+    cfg.reviewers = [Reviewer(name="a", focus="x")]
+
+    created: list[str] = []
+
+    class _FakeAgent:
+        def __init__(self, model="", extra_args=None, deadline=None):
+            created.append(model)
+            self.model = model
+            self.extra_args = extra_args or []
+            self.deadline = deadline
+
+    monkeypatch.setattr(review, "Agent", _FakeAgent)
+
+    base = _FakeAgent(model="base-model")
+    created.clear()
+    agents = review._review_agents(base, cfg)
+    assert agents["review-model"].model == "review-model"
+    assert created == ["review-model"]
