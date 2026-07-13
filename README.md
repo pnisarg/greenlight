@@ -79,6 +79,10 @@ GREENLIGHT_REF=3ca386909a9c56001d3a5c568b61f36b6d25d50e
 uv tool install "git+https://github.com/pnisarg/greenlight.git@$GREENLIGHT_REF"
 pi install "https://github.com/pnisarg/greenlight@$GREENLIGHT_REF"
 
+# Persist uv's tool bin for future shells and enable it in this shell now.
+uv tool update-shell
+export PATH="$(uv tool dir --bin):$PATH"
+
 # 4. Verify that the CLI can find Pi, then verify Pi's authentication.
 greenlight doctor
 pi -p "Reply with exactly: pi is ready"
@@ -96,8 +100,8 @@ Both installs in step 3 are intentional:
 
 API keys also work instead of `/login`; configure the provider in Pi before the
 first greenlight run. The install is pinned because Pi packages execute with full
-system access. When upgrading, replace `GREENLIGHT_REF` with a reviewed release
-tag or commit and use the same ref for both commands.
+system access. When upgrading, replace `GREENLIGHT_REF` with a full reviewed
+commit SHA—not a movable branch or tag—and use the same SHA for both commands.
 
 ### Install from a development checkout
 
@@ -206,11 +210,15 @@ card.
 #### Claude Code
 
 Expose the installed skill to Claude Code once. This source path assumes the
-recommended git-package install above; for a development install, set
-`GREENLIGHT_SKILL` to the checkout's absolute `skill` directory instead.
+recommended git-package install above. If `PI_CODING_AGENT_DIR` is set, use an
+absolute, shell-expanded value such as `$HOME/.config/pi`, not `~/.config/pi` or
+a relative path. For a development install, set `GREENLIGHT_SKILL` to the
+checkout's absolute `skill` directory before running the snippet; the default
+below preserves that override.
 
 ```sh
-GREENLIGHT_SKILL="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/git/github.com/pnisarg/greenlight/skill"
+PI_AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
+GREENLIGHT_SKILL="${GREENLIGHT_SKILL:-$PI_AGENT_DIR/git/github.com/pnisarg/greenlight/skill}"
 mkdir -p ~/.claude/skills
 ln -s "$GREENLIGHT_SKILL" ~/.claude/skills/greenlight
 ```
@@ -230,12 +238,12 @@ Claude Code's current model is never inherited.
 
 #### Codex
 
-Expose the same installed skill to Codex once. As above, point
-`GREENLIGHT_SKILL` at the checkout's absolute `skill` directory when using the
-development install.
+Expose the same installed skill to Codex once. The same absolute-path rule and
+`GREENLIGHT_SKILL` development override apply.
 
 ```sh
-GREENLIGHT_SKILL="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/git/github.com/pnisarg/greenlight/skill"
+PI_AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
+GREENLIGHT_SKILL="${GREENLIGHT_SKILL:-$PI_AGENT_DIR/git/github.com/pnisarg/greenlight/skill}"
 mkdir -p ~/.agents/skills
 ln -s "$GREENLIGHT_SKILL" ~/.agents/skills/greenlight
 ```
