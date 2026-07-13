@@ -59,7 +59,8 @@ green.
 > optional UI integration.
 
 Prerequisites: `git`, Python 3.11+, [`uv`](https://docs.astral.sh/uv/), and
-Node/npm. [`gh`](https://cli.github.com/) is optional and enables PR creation.
+Node.js 22.19+ with npm. [`gh`](https://cli.github.com/) is optional and enables
+PR creation.
 
 ### Recommended install
 
@@ -73,9 +74,10 @@ npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 #    such as Claude Pro/Max or ChatGPT Plus/Pro (Codex), then exit Pi.
 pi
 
-# 3. Install both the greenlight CLI and its Pi package.
-uv tool install git+https://github.com/pnisarg/greenlight.git
-pi install https://github.com/pnisarg/greenlight
+# 3. Install both components from the same reviewed commit.
+GREENLIGHT_REF=3ca386909a9c56001d3a5c568b61f36b6d25d50e
+uv tool install "git+https://github.com/pnisarg/greenlight.git@$GREENLIGHT_REF"
+pi install "https://github.com/pnisarg/greenlight@$GREENLIGHT_REF"
 
 # 4. Verify that the CLI can find Pi, then verify Pi's authentication.
 greenlight doctor
@@ -93,7 +95,9 @@ Both installs in step 3 are intentional:
   `greenlight`.
 
 API keys also work instead of `/login`; configure the provider in Pi before the
-first greenlight run.
+first greenlight run. The install is pinned because Pi packages execute with full
+system access. When upgrading, replace `GREENLIGHT_REF` with a reviewed release
+tag or commit and use the same ref for both commands.
 
 ### Install from a development checkout
 
@@ -201,12 +205,14 @@ card.
 
 #### Claude Code
 
-Expose the installed skill to Claude Code once:
+Expose the installed skill to Claude Code once. This source path assumes the
+recommended git-package install above; for a development install, set
+`GREENLIGHT_SKILL` to the checkout's absolute `skill` directory instead.
 
 ```sh
+GREENLIGHT_SKILL="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/git/github.com/pnisarg/greenlight/skill"
 mkdir -p ~/.claude/skills
-ln -s ~/.pi/agent/git/github.com/pnisarg/greenlight/skill \
-  ~/.claude/skills/greenlight
+ln -s "$GREENLIGHT_SKILL" ~/.claude/skills/greenlight
 ```
 
 Then start Claude Code in the repository you are changing and invoke:
@@ -217,17 +223,21 @@ Then start Claude Code in the repository you are changing and invoke:
 ```
 
 Claude authors the intent and invokes `greenlight`; greenlight launches Pi for
-all pipeline agent work. The Pi process uses the provider selected during the
-installation `/login`, not Claude Code's current model session.
+all pipeline agent work. Pi resolves reviewer models from per-reviewer `model`,
+then `review_model`, then the global `model`; intent and fixes use the global
+`model`. All fall back to Pi's persisted default. `/login` supplies credentials;
+Claude Code's current model is never inherited.
 
 #### Codex
 
-Expose the same installed skill to Codex once:
+Expose the same installed skill to Codex once. As above, point
+`GREENLIGHT_SKILL` at the checkout's absolute `skill` directory when using the
+development install.
 
 ```sh
+GREENLIGHT_SKILL="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/git/github.com/pnisarg/greenlight/skill"
 mkdir -p ~/.agents/skills
-ln -s ~/.pi/agent/git/github.com/pnisarg/greenlight/skill \
-  ~/.agents/skills/greenlight
+ln -s "$GREENLIGHT_SKILL" ~/.agents/skills/greenlight
 ```
 
 Start Codex in the repository you are changing, use `/skills` to confirm that
@@ -239,15 +249,15 @@ $greenlight Implement <task>, commit it, then validate it.
 ```
 
 Codex authors the intent and invokes `greenlight`; greenlight launches Pi for all
-pipeline agent work. The Pi process uses the provider selected during the
-installation `/login`, not Codex's current model session.
+pipeline agent work. Pi uses the same configuration precedence described above;
+`/login` supplies credentials, and Codex's current model is not inherited.
 
-The symlinks intentionally point at Pi's installed git package, so
-`pi update --extensions` updates the shared skill for all three clients. If a
-skill destination already exists, remove or rename it before creating the
-symlink. For a team-repository install instead, copy `skill/SKILL.md` into both
-`.claude/skills/greenlight/` and `.agents/skills/greenlight/` and commit those
-copies.
+The symlinks intentionally point at Pi's installed git package, so reinstalling
+with a newer reviewed `GREENLIGHT_REF` updates the shared skill for all three
+clients. If a skill destination already exists, remove or rename it before
+creating the symlink. For a team-repository install instead, copy
+`skill/SKILL.md` into both `.claude/skills/greenlight/` and
+`.agents/skills/greenlight/` and commit those copies.
 
 Claude Code and Codex do not render Pi's live tool card. Run `greenlight watch`
 in a second terminal when you want the same pipeline progress outside Pi.
@@ -262,10 +272,8 @@ pipeline as it advances — intent → lint → review loop (per reviewer, per r
 real time. The agent’s architecture is unchanged: it still authors the intent
 and hands off; the extension only renders greenlight’s event stream.
 
-```sh
-# Already included in the recommended installation above.
-pi install https://github.com/pnisarg/greenlight
-```
+The recommended installation above installs this package from the same reviewed
+commit as the CLI.
 
 The extension is a pure renderer over a machine-readable event stream that
 greenlight emits as JSONL to `$GREENLIGHT_EVENTS` (additive; unset = no-op, so
