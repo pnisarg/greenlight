@@ -8,7 +8,7 @@ Commands:
   greenlight review-log [--list|--run N]   inspect reviewer findings from a run
   greenlight gc [--all]                    repack bare gate repos to reclaim disk
   greenlight hook --bare ... --work ...    internal: invoked by post-receive
-  greenlight doctor                        check environment
+  greenlight doctor [--json]               check environment
 """
 from __future__ import annotations
 
@@ -349,16 +349,31 @@ def _cmd_gc(args) -> int:
 
 
 def _cmd_doctor(args) -> int:
-    step("greenlight doctor")
-    info(f"greenlight: {__version__}")
+    tools = {}
     okk = True
     for tool, required in (("git", True), ("pi", True), ("gh", False)):
         path = which(tool)
-        if path:
-            ok(f"{tool}: {path}")
-        elif required:
-            fail(f"{tool}: MISSING (required)")
+        tools[tool] = {
+            "available": path is not None,
+            "path": path,
+            "required": required,
+        }
+        if required and path is None:
             okk = False
+
+    if args.json:
+        import json
+
+        print(json.dumps({"ok": okk, "tools": tools, "version": __version__}, indent=2))
+        return 0 if okk else 1
+
+    step("greenlight doctor")
+    info(f"greenlight: {__version__}")
+    for tool, details in tools.items():
+        if details["available"]:
+            ok(f"{tool}: {details['path']}")
+        elif details["required"]:
+            fail(f"{tool}: MISSING (required)")
         else:
             info(f"{tool}: not found (optional — PR creation disabled)")
     return 0 if okk else 1
@@ -415,6 +430,8 @@ def build_parser() -> argparse.ArgumentParser:
     prl.set_defaults(func=_cmd_review_log)
 
     pd = sub.add_parser("doctor", help="check the environment")
+    pd.add_argument("--json", action="store_true",
+                    help="print a machine-readable environment report")
     pd.set_defaults(func=_cmd_doctor)
     return p
 
