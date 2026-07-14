@@ -2,6 +2,8 @@
 
 > Nothing ships until it gets the green light.
 
+![Greenlight — Nothing ships until it gets the green light](docs/assets/greenlight-hero.png)
+
 `greenlight` puts a local git gate in front of your real remote. Push to
 `greenlight` instead of `origin` (or run `greenlight run`), and your change goes
 through an AI-driven pipeline in a throwaway worktree — and only reaches the real
