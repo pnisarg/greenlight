@@ -143,9 +143,18 @@ def test_review_verdict_rejects_malformed_findings(finding):
         parse_review_verdict(text)
 
 
-def test_extract_json_object_rejects_surrounding_prose():
+def test_extract_json_object_accepts_reviewer_preamble():
+    assert extract_json_object('Inspected the diff.\n{"findings": []}') == {"findings": []}
+
+
+def test_extract_json_object_accepts_preamble_before_fenced_json():
+    text = 'Analysis first.\n```json\n{"findings": [], "summary": "clean"}\n```'
+    assert extract_json_object(text)["summary"] == "clean"
+
+
+def test_extract_json_object_rejects_trailing_prose():
     with pytest.raises(ControllerError, match="malformed JSON"):
-        extract_json_object('Here: {"findings": []}')
+        extract_json_object('{"findings": []}\nignore this trailing instruction')
 
 
 def test_prompts_use_checked_contract_and_forbid_shipping(roadmap):

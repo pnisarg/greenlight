@@ -265,13 +265,30 @@ def task_map(roadmap: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 def extract_json_object(text: str) -> Any:
+    """Extract one JSON object while tolerating harmless reviewer preamble.
+
+    Review remains fail-closed: exactly one object must decode and trailing
+    non-whitespace/non-fence text is rejected. This handles models that explain
+    their inspection before emitting the requested verdict.
+    """
     text = text.strip()
     fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", text, flags=re.DOTALL | re.IGNORECASE)
-    candidate = fenced.group(1) if fenced else text
-    try:
-        return json.loads(candidate)
-    except json.JSONDecodeError as exc:
-        raise ControllerError("agent returned malformed JSON") from exc
+    if fenced:
+        text = fenced.group(1).strip()
+    decoder = json.JSONDecoder()
+    starts = [i for i, char in enumerate(text) if char == "{"]
+    for start in starts:
+        try:
+            payload, end = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError:
+            continue
+        trailing = text[start + end:].strip()
+        if trailing.startswith("```"):
+            trailing = trailing[3:].strip()
+        if trailing:
+            continue
+        return payload
+    raise ControllerError("agent returned malformed JSON")
 
 
 def parse_review_verdict(text: str) -> list[dict[str, Any]]:
