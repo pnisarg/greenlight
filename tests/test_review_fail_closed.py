@@ -123,6 +123,155 @@ def test_retry_recovers_a_transient_blip(tmp_path):
     assert findings == []
 
 
+# A `findings` list whose *items* don't match the schema is not a verdict
+# either: coercing junk into a Finding (defaulting severity to "warning",
+# file/description to "") invents review output nobody produced, and a bad
+# severity could downgrade an item below the blocking threshold — a false green
+# light. Each case below is one structural way a finding can be malformed.
+_OMIT = object()  # marks a key the reviewer left out entirely
+
+
+def _finding(**over) -> dict:
+    base = {"severity": "error", "file": "a.py", "line": 1, "description": "boom"}
+    base.update(over)
+    return {k: v for k, v in base.items() if v is not _OMIT}
+
+
+_MALFORMED = [
+    ("non_object_string", {"findings": ["not an object"]}, "not an object"),
+    ("non_object_null", {"findings": [None]}, "not an object"),
+    ("non_object_list", {"findings": [[{"severity": "error"}]]}, "not an object"),
+    ("unknown_severity", {"findings": [_finding(severity="critical")]}, "severity"),
+    ("non_string_severity", {"findings": [_finding(severity=2)]}, "severity"),
+    ("missing_severity", {"findings": [_finding(severity=_OMIT)]}, "severity"),
+    ("empty_description", {"findings": [_finding(description="   ")]}, "description"),
+    ("missing_description", {"findings": [_finding(description=_OMIT)]}, "description"),
+    ("non_string_description", {"findings": [_finding(description=42)]}, "description"),
+    # ESC/CR in a description would let reviewer text repaint the operator's
+    # terminal card (forging a green "review clean" line).
+    ("escape_in_description",
+     {"findings": [_finding(description="clean \x1b[32m ok all good")]}, "description"),
+    ("carriage_return_in_description",
+     {"findings": [_finding(description="bug\r ok  review clean")]}, "description"),
+    ("empty_file", {"findings": [_finding(file="")]}, "file"),
+    ("blank_file", {"findings": [_finding(file="   ")]}, "file"),
+    ("missing_file", {"findings": [_finding(file=_OMIT)]}, "file"),
+    ("non_string_file", {"findings": [_finding(file=7)]}, "file"),
+    ("absolute_file", {"findings": [_finding(file="/etc/passwd")]}, "file"),
+    ("traversal_file", {"findings": [_finding(file="../../etc/passwd")]}, "file"),
+    ("backslash_traversal_file",
+     {"findings": [_finding(file="..\\..\\secrets.env")]}, "file"),
+    ("newline_in_file", {"findings": [_finding(file="a.py\nb.py")]}, "file"),
+    ("home_relative_file", {"findings": [_finding(file="~/.ssh/id_rsa")]}, "file"),
+    ("zero_line", {"findings": [_finding(line=0)]}, "line"),
+    ("negative_line", {"findings": [_finding(line=-3)]}, "line"),
+    ("bool_line", {"findings": [_finding(line=True)]}, "line"),
+    ("string_line", {"findings": [_finding(line="12")]}, "line"),
+    ("float_line", {"findings": [_finding(line=12.5)]}, "line"),
+    # One bad item poisons the whole verdict: we can't tell which of the
+    # reviewer's other conclusions survived whatever produced the bad one.
+    ("valid_item_alongside_malformed",
+     {"findings": [_finding(), _finding(severity="critical")]}, "finding 1"),
+]
+
+
+@pytest.mark.parametrize(
+    "payload,expected", [(p, e) for _, p, e in _MALFORMED],
+    ids=[i for i, _, _ in _MALFORMED],
+)
+def test_malformed_finding_fails_closed(tmp_path, payload, expected):
+    """A structurally invalid finding is retried once (a schema slip can be a
+    transient model glitch) and then fails the gate closed, with the reason
+    naming the offending field."""
+    agent = _ScriptedAgent([payload, payload])
+    findings, inconclusive = review._run_reviewers(
+        agent, str(tmp_path), _one_reviewer_cfg(), "B", "H", "i", 1
+    )
+    assert agent.calls == 2
+    assert inconclusive == ["brutal"]
+    assert len(findings) == 1  # only the synthesized blocking finding
+    assert findings[0].severity == "error"
+    assert findings[0].blocks("warning")
+    assert expected in findings[0].description
+
+
+def test_malformed_findings_are_not_partially_kept(tmp_path):
+    """The valid sibling of a malformed finding must not leak through as if the
+    reviewer had reported only it."""
+    payload = {"findings": [_finding(description="real bug"), _finding(line=0)]}
+    findings, _ = review._run_reviewers(
+        _ScriptedAgent([payload, payload]), str(tmp_path), _one_reviewer_cfg(),
+        "B", "H", "i", 1
+    )
+    assert [f.description for f in findings] != ["real bug"]
+    assert all("no usable verdict" in f.description for f in findings)
+
+
+def test_malformed_after_hard_timeout_is_not_retried(tmp_path):
+    """A hung reviewer (exit 124) that emitted a malformed findings list is
+    still a hung reviewer: fail closed without doubling the latency."""
+    payload = {"findings": [_finding(severity="critical")]}
+    agent = _ScriptedAgent([(json.dumps(payload), 124)])
+    findings, inconclusive = review._run_reviewers(
+        agent, str(tmp_path), _one_reviewer_cfg(), "B", "H", "i", 1
+    )
+    assert agent.calls == 1  # NOT retried
+    assert inconclusive == ["brutal"]
+    assert findings[0].blocks("warning")
+
+
+def test_malformed_verdict_fails_run_step_without_fixing(tmp_path):
+    """End to end: a malformed verdict blocks the gate and never reaches the fix
+    agent — there is no code defect to fix, the review didn't produce one."""
+    payload = {"findings": [_finding(file="/etc/passwd")]}
+    agent = _ScriptedAgent([payload] * 4)
+
+    def _no_commit(_msg):
+        raise AssertionError("fix loop must not run on a malformed verdict")
+
+    res = review.run_step(agent, str(tmp_path), _one_reviewer_cfg(), "B", "H", "i",
+                          _no_commit)
+    assert res.passed is False
+    assert "inconclusive" in res.summary
+    assert agent.calls == 2  # one round: ran + retried, then bailed
+
+
+def test_valid_findings_stay_backward_compatible(tmp_path):
+    """Real reviewer output still parses: every severity, an explicit null line,
+    an omitted line, extra additive keys, and padded strings."""
+    payload = {
+        "findings": [
+            {"severity": "error", "file": "a.py", "line": 10, "description": "boom"},
+            {"severity": "warning", "file": "b.py", "line": None, "description": " pad "},
+            {"severity": "info", "file": "c.py", "description": "no line key"},
+            {"severity": "ERROR", "file": " d.py ", "line": 2, "description": "shouty",
+             "confidence": 0.9},
+        ],
+        "summary": "four findings",
+    }
+    agent = _ScriptedAgent([payload])
+    findings, inconclusive = review._run_reviewers(
+        agent, str(tmp_path), _one_reviewer_cfg(), "B", "H", "i", 1
+    )
+    assert agent.calls == 1  # a real verdict is never retried
+    assert inconclusive == []
+    assert [f.severity for f in findings] == ["error", "warning", "info", "error"]
+    assert [f.line for f in findings] == [10, None, None, 2]
+    assert [f.file for f in findings] == ["a.py", "b.py", "c.py", "d.py"]
+    assert [f.description for f in findings] == ["boom", "pad", "no line key", "shouty"]
+    assert all(f.reviewer == "brutal" for f in findings)
+
+
+def test_multiline_description_is_still_valid(tmp_path):
+    """Newlines and tabs are ordinary prose, not a malformed finding."""
+    payload = {"findings": [_finding(description="line one\n\tline two")]}
+    findings, inconclusive = review._run_reviewers(
+        _ScriptedAgent([payload]), str(tmp_path), _one_reviewer_cfg(), "B", "H", "i", 1
+    )
+    assert inconclusive == []
+    assert findings[0].description == "line one\n\tline two"
+
+
 def test_genuinely_empty_findings_is_clean_not_inconclusive(tmp_path):
     """`{"findings": []}` is a real verdict: clean, no retry, not inconclusive."""
     agent = _ScriptedAgent([{"findings": [], "summary": "clean"}])
