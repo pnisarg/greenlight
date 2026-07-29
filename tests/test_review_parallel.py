@@ -103,6 +103,8 @@ def test_duplicate_reviewer_names_do_not_collide(tmp_path):
             return AgentResult(text="```json\n" + json.dumps(payload) + "\n```", code=0)
 
     cfg = default_config()
+    # Defense in depth: config.load now rejects duplicate names outright, so
+    # these are built directly to keep the runtime index-keying honest.
     cfg.reviewers = [
         Reviewer(name="dup", focus="focus-one"),
         Reviewer(name="dup", focus="focus-two"),

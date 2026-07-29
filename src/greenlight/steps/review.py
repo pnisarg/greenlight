@@ -13,8 +13,10 @@ intent stable.
 from __future__ import annotations
 
 
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 
 from .. import events
 from ..agent import Agent
@@ -22,12 +24,13 @@ from ..config import Config, Reviewer
 from ..util import GreenlightError, info, ok, step, warn
 from .types import Finding, StepResult
 
-# A reviewer that returns no parseable verdict (timed out, pi failed, or emitted
-# prose instead of the findings schema) must never be read as "clean" — that is
-# a false green light, the worst failure mode for a gate. We fail the gate closed
-# with a synthesized blocking finding so the card and review-log show why; the
-# specific cause (so the operator knows whether to bump the timeout, check the
-# gateway, or check the model) is appended per failure.
+# A reviewer that returns no parseable verdict (timed out, pi failed, emitted
+# prose instead of the findings schema, or emitted findings that don't match it)
+# must never be read as "clean" — that is a false green light, the worst failure
+# mode for a gate. We fail the gate closed with a synthesized blocking finding so
+# the card and review-log show why; the specific cause (so the operator knows
+# whether to bump the timeout, check the gateway, or check the model) is appended
+# per failure.
 _INCONCLUSIVE_DESC = (
     "reviewer returned no usable verdict; failing the gate closed rather than "
     "treating an un-run review as clean"
@@ -82,19 +85,107 @@ Rules:
 {_REVIEW_SCHEMA_HINT}"""
 
 
-def _parse_findings(payload, reviewer: str) -> list[Finding]:
-    if not isinstance(payload, dict):
-        return []
+class _MalformedVerdict(Exception):
+    """A findings list whose items don't match the schema.
+
+    Raised so the caller routes the reviewer to inconclusive (fail closed)
+    instead of coercing junk into a Finding.
+    """
+
+
+_SEVERITIES = ("error", "warning", "info")
+
+# C0 control characters are never legitimate content in reviewer output, and a
+# description is rendered into the ANSI card and pasted into the fix agent's
+# prompt: an ESC or CR there lets reviewer text repaint the operator's terminal
+# (forging, say, a green "review clean" line). Tabs and newlines are ordinary
+# prose and stay allowed; a path gets neither.
+_TEXT_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+_PATH_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+_DRIVE_LETTER = re.compile(r"^[A-Za-z]:")
+
+
+def _short(value) -> str:
+    """repr of a rejected value, bounded and control-char escaped (it ends up in
+    the synthesized finding, an event, and the terminal card)."""
+    text = repr(value)
+    return text if len(text) <= 80 else text[:77] + "..."
+
+
+def _parse_severity(raw, i: int) -> str:
+    # Case and padding are normalized (reviewers do emit "ERROR"), but anything
+    # outside the schema is rejected rather than defaulted to "warning": an
+    # unrecognized severity silently ranked below the blocking threshold would
+    # turn a real finding into a pass.
+    severity = raw.strip().lower() if isinstance(raw, str) else None
+    if severity not in _SEVERITIES:
+        raise _MalformedVerdict(f"finding {i} has an invalid severity {_short(raw)}")
+    return severity
+
+
+def _parse_file(raw, i: int) -> str:
+    path = raw.strip() if isinstance(raw, str) else ""
+    if not path:
+        raise _MalformedVerdict(f"finding {i} has an invalid file {_short(raw)}")
+    # Findings anchor to a path inside the reviewed worktree. An absolute path, a
+    # `~` home reference, or a `..` segment points outside it, so it is either a
+    # confused reviewer or an attempt to aim the fix agent (and any future UI
+    # that resolves the path) at something that was never reviewed. Backslashes
+    # are treated as separators so a Windows-style traversal can't slip past the
+    # posix split.
+    posix = path.replace("\\", "/")
+    if (
+        _PATH_CONTROL.search(path)
+        or PurePosixPath(posix).is_absolute()
+        or _DRIVE_LETTER.match(posix)
+        or posix.startswith("~")
+        or ".." in PurePosixPath(posix).parts
+    ):
+        raise _MalformedVerdict(f"finding {i} has an invalid file {_short(raw)}")
+    return path
+
+
+def _parse_line(raw, i: int) -> int | None:
+    # Absent or null is fine (a file-level finding); anything else must be a real
+    # 1-indexed line. bool is an int subclass, hence the explicit exclusion.
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+        raise _MalformedVerdict(f"finding {i} has an invalid line {_short(raw)}")
+    return raw
+
+
+def _parse_description(raw, i: int) -> str:
+    desc = raw.strip() if isinstance(raw, str) else ""
+    if not desc:
+        raise _MalformedVerdict(f"finding {i} has an invalid description {_short(raw)}")
+    if _TEXT_CONTROL.search(desc):
+        raise _MalformedVerdict(f"finding {i} has a control character in description")
+    return desc
+
+
+def _parse_findings(items: list, reviewer: str) -> list[Finding]:
+    """Validate every field of every finding, or reject the whole verdict.
+
+    Coercion is the danger here: defaulting a missing severity to "warning" or a
+    missing file to "" fabricates review output nobody produced, and one bad
+    severity can rank a real defect below the blocking threshold. A single
+    malformed item invalidates the list — we can't tell which of the reviewer's
+    other conclusions survived whatever produced the bad one — so this raises
+    _MalformedVerdict and the reviewer is treated as inconclusive.
+
+    Unknown extra keys are tolerated: they are additive, not ambiguous.
+    """
     out = []
-    for f in payload.get("findings", []) or []:
+    for i, f in enumerate(items):
         if not isinstance(f, dict):
-            continue
+            raise _MalformedVerdict(f"finding {i} is not an object")
         out.append(
             Finding(
-                severity=str(f.get("severity", "warning")).lower(),
-                file=str(f.get("file", "")),
-                line=f.get("line") if isinstance(f.get("line"), int) else None,
-                description=str(f.get("description", "")).strip(),
+                severity=_parse_severity(f.get("severity"), i),
+                file=_parse_file(f.get("file"), i),
+                line=_parse_line(f.get("line"), i),
+                description=_parse_description(f.get("description"), i),
                 reviewer=reviewer,
             )
         )
@@ -105,9 +196,10 @@ def _review_once(
     agent: Agent, work_dir: str, r: Reviewer, base: str, head: str, intent: str
 ) -> _Verdict:
     """Run one reviewer. Returns a _Verdict whose findings is None when the
-    verdict is inconclusive — the agent raised, or its output had no `findings`
-    list (prose, truncated JSON, a degraded gateway). None must never be read as
-    "clean"; the reason/timed_out fields let the caller report and route it.
+    verdict is inconclusive — the agent raised, its output had no `findings`
+    list (prose, truncated JSON, a degraded gateway), or an item in that list
+    failed schema validation. None must never be read as "clean"; the
+    reason/timed_out fields let the caller report and route it.
     """
     skills = [r.skill] if r.skill else None
     try:
@@ -134,7 +226,16 @@ def _review_once(
             else "pi returned prose / invalid JSON, not the findings schema"
         )
         return _Verdict(None, reason=reason)
-    return _Verdict(_parse_findings(payload, r.name))
+    try:
+        return _Verdict(_parse_findings(payload["findings"], r.name))
+    except _MalformedVerdict as exc:
+        # A schema slip can be a one-off model glitch, so this is retried like
+        # prose — unless the reviewer also hung (124), which a retry won't fix.
+        return _Verdict(
+            None,
+            reason=f"malformed findings schema: {exc}",
+            timed_out=res.code == 124,
+        )
 
 
 def _inconclusive_finding(reviewer: str, reason: str) -> Finding:

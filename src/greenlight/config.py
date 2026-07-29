@@ -11,6 +11,8 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .util import GreenlightError
+
 CONFIG_NAME = ".greenlight.toml"
 
 
@@ -157,11 +159,36 @@ def default_config() -> Config:
 
 
 def _coerce_reviewers(raw: list[dict]) -> list[Reviewer]:
+    """Build the reviewer list, rejecting entries with no usable identity.
+
+    A reviewer's name is its identity everywhere downstream: it keys the
+    blocking-severity threshold map that decides what stops the gate, labels
+    findings in the fix prompt, and names the reviewer in events and the
+    review-log. Two entries sharing a name collapse to one threshold, so a
+    strict reviewer's findings can be judged against a lax duplicate's — a
+    misconfiguration that reads as a clean run. Fail the load instead.
+    """
     out = []
+    seen: set[str] = set()
     for r in raw:
+        if not isinstance(r, dict):
+            raise GreenlightError(f"{CONFIG_NAME}: each reviewer must be a table")
+        if "name" not in r:
+            raise GreenlightError(f"{CONFIG_NAME}: reviewer entry is missing a name")
+        # Stored stripped so the name that was uniqueness-checked is the one the
+        # threshold map and events are keyed by.
+        name = str(r["name"]).strip()
+        if not name:
+            raise GreenlightError(f"{CONFIG_NAME}: reviewer name must not be empty")
+        if name in seen:
+            raise GreenlightError(
+                f"{CONFIG_NAME}: duplicate reviewer name {name!r}; "
+                "reviewer names must be unique"
+            )
+        seen.add(name)
         out.append(
             Reviewer(
-                name=str(r["name"]),
+                name=name,
                 skill=r.get("skill"),
                 focus=str(r.get("focus", "")),
                 model=str(r.get("model", "")),

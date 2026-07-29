@@ -305,7 +305,9 @@ evidence_dir = ".greenlight/evidence"
 # lint_cmd = "ruff check ."
 
 # Define exactly what review cares about. Each reviewer is an independent,
-# read-only agent. Use a `focus` prompt or load a pi `skill`.
+# read-only agent. Use a `focus` prompt or load a pi `skill`. Names are the
+# reviewer's identity (they key its blocking threshold and label its findings),
+# so they must be non-empty and unique — a duplicate fails the config load.
 [[reviewers]]
 name = "brutal"
 focus = "Brutally honest senior review. Real bugs, broken edge cases, race conditions, bad error handling, needless complexity. No style nits."
