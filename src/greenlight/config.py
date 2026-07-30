@@ -210,13 +210,13 @@ def _coerce_verify(raw: list[dict]) -> list[VerifyTarget]:
     ]
 
 
-def load(repo_root: str | Path) -> Config:
-    """Load config from repo, layering file values over defaults."""
+def loads(text: str, source: str = CONFIG_NAME) -> Config:
+    """Parse config text, layering its values over built-in defaults."""
     cfg = default_config()
-    path = Path(repo_root) / CONFIG_NAME
-    if not path.exists():
-        return cfg
-    data = tomllib.loads(path.read_text())
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise GreenlightError(f"invalid {source}: {exc}") from exc
 
     if "reviewers" in data:
         rv = _coerce_reviewers(data["reviewers"])
@@ -259,3 +259,15 @@ def load(repo_root: str | Path) -> Config:
     cfg.review_model = str(gen.get("review_model", cfg.review_model))
     cfg.push_target = str(gen.get("push_target", cfg.push_target))
     return cfg
+
+
+def load(repo_root: str | Path) -> Config:
+    """Load candidate config from a repo, layering it over defaults.
+
+    Security-sensitive run paths must use ``policy.load`` instead. This loader
+    remains the explicit bootstrap/parser path for repository configuration.
+    """
+    path = Path(repo_root) / CONFIG_NAME
+    if not path.exists():
+        return default_config()
+    return loads(path.read_text(), str(path))
