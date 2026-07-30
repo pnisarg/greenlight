@@ -57,6 +57,7 @@ def run_pipeline(
     default_branch: str,
     supplied_intent: str | None,
     forward=None,
+    policy_digest: str = "",
 ) -> bool:
     """Run the gate. `forward`, if given, is a no-arg callable returning bool
     that pushes the validated branch to the real remote. It is invoked AFTER
@@ -79,7 +80,10 @@ def run_pipeline(
     # Stamp the pipeline PID so a watcher can tell a still-running gate apart from
     # one that was killed mid-run (e.g. the pi window closed): a missing run_end
     # plus a dead PID means abandoned, not slow.
-    events.emit("run_start", branch=branch, classification=cls.label, files=files, pid=os.getpid())
+    events.emit(
+        "run_start", branch=branch, classification=cls.label, files=files,
+        pid=os.getpid(), policy_digest=policy_digest,
+    )
 
     def _budget_check(stage: str) -> bool:
         if deadline.expired():

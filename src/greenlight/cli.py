@@ -2,6 +2,7 @@
 
 Commands:
   greenlight init [--push-target origin]   set up the gate for this repo
+  greenlight policy update                 trust repository policy explicitly
   greenlight run --intent "..."            run the pipeline on the current branch
                                            (explicit path; no push needed)
   greenlight watch                         render the live pipeline card
@@ -19,20 +20,41 @@ import sys
 import time
 from pathlib import Path
 
-from . import __version__, config, events, gate, gitx, render, worktree
+from . import __version__, config, events, gate, gitx, policy, render, worktree
 from .pipeline import run_pipeline
 from .util import GreenlightError, fail, info, ok, run, step, warn, which
 
 
 def _cmd_init(args) -> int:
-    res = gate.init(args.work or ".", push_target=args.push_target)
+    root = gitx.main_repo_root(args.work or ".")
+    _maybe_write_default_config(root)
+    # Validate before provisioning durable gate state. Only a genuinely new gate
+    # gets an initial snapshot; legacy installations must migrate explicitly so
+    # re-running init from a judged branch cannot import that branch's policy.
+    config.load(root)
+    bare = gate.bare_path(gate._repo_id(root))
+    new_gate = not (bare / "HEAD").exists()
+    gate.init(root, push_target=args.push_target)
+    pointer = policy.policy_dir(root) / "current"
+    if new_gate:
+        snapshot = policy.update(root)
+        ok(f"trusted policy initialized  v{snapshot.version} {snapshot.digest}")
+    elif not pointer.exists():
+        warn("no trusted policy snapshot; migrate with `greenlight policy update`")
     print()
     print("  Push through the gate with:")
     print(f"    git push {gate.REMOTE_NAME} <branch>")
     print()
     print("  Or run the pipeline explicitly:")
     print('    greenlight run --intent "what you set out to do"')
-    _maybe_write_default_config(res["repo_root"])
+    return 0
+
+
+def _cmd_policy_update(args) -> int:
+    root = gitx.main_repo_root(args.work or ".")
+    snapshot = policy.update(root)
+    ok(f"trusted policy updated  v{snapshot.version} {snapshot.digest}")
+    info(f"source: {Path(root) / config.CONFIG_NAME}")
     return 0
 
 
@@ -60,7 +82,8 @@ def _read_intent(args) -> str | None:
 def _cmd_run(args) -> int:
     """Explicit-path run: validate the current committed branch in a worktree."""
     root = gitx.main_repo_root(args.work or ".")
-    cfg = config.load(root)
+    trusted = policy.load(root)
+    cfg = trusted.config
     branch = gitx.current_branch(root)
     default_branch = gitx.default_branch(root, cfg.push_target)
     if branch == default_branch:
@@ -93,7 +116,10 @@ def _cmd_run(args) -> int:
         return _forward(bare, cfg.push_target, branch)
 
     with worktree.checkout(bare, branch, head) as wt:
-        passed = run_pipeline(wt, cfg, branch, base, default_branch, _read_intent(args), forward)
+        passed = run_pipeline(
+            wt, cfg, branch, base, default_branch, _read_intent(args), forward,
+            policy_digest=trusted.digest,
+        )
     if passed:
         _sync_local_branch(root, bare, branch)
         return 0
@@ -153,7 +179,8 @@ def _cmd_hook(args) -> int:
     # honor their cwd instead of pinning to the bare repo.
     gate.scrub_git_env()
     root = args.work
-    cfg = config.load(root)
+    trusted = policy.load(root)
+    cfg = trusted.config
     default_branch = gitx.default_branch(root, cfg.push_target)
     # Publish events to the per-repo default path so a `greenlight watch` running
     # in the user's terminal can render this server-side run.
@@ -174,7 +201,10 @@ def _cmd_hook(args) -> int:
             return _forward(args.bare, cfg.push_target, b)
 
         with worktree.checkout(args.bare, branch, new_sha) as wt:
-            passed = run_pipeline(wt, cfg, branch, base, default_branch, supplied_intent, forward)
+            passed = run_pipeline(
+                wt, cfg, branch, base, default_branch, supplied_intent, forward,
+                policy_digest=trusted.digest,
+            )
         if passed:
             _sync_local_branch(root, args.bare, branch)
         else:
@@ -373,6 +403,12 @@ def build_parser() -> argparse.ArgumentParser:
     pi.add_argument("--work", default=".", help="repo working dir (default: .)")
     pi.add_argument("--push-target", default="origin", help="remote to forward to on pass")
     pi.set_defaults(func=_cmd_init)
+
+    pp = sub.add_parser("policy", help="manage trusted review policy")
+    pps = pp.add_subparsers(dest="policy_cmd", required=True)
+    ppu = pps.add_parser("update", help="trust the repository config explicitly")
+    ppu.add_argument("--work", default=".", help="repo working dir (default: .)")
+    ppu.set_defaults(func=_cmd_policy_update)
 
     pr = sub.add_parser("run", help="run the pipeline on the current branch")
     pr.add_argument("--work", default=".")

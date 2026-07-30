@@ -119,7 +119,7 @@ greenlight doctor
 ## Use
 
 ```sh
-greenlight init                  # set up the gate + write a starter .greenlight.toml
+greenlight init                  # set up the gate + trust the initial policy
 git checkout -b feat/my-change   # work on a feature branch, commit your work
 
 # either push through the gate…
@@ -130,6 +130,40 @@ greenlight run --intent "add a greeting helper"
 
 On pass, the branch is forwarded to your push target and a PR is opened with the
 intent and verification evidence in the body.
+
+### Trusted policy
+
+`.greenlight.toml` is the editable policy source, but a branch under review never
+gets to set its own rules. Greenlight runs from a versioned snapshot under
+`~/.greenlight/policies/<repo-id>/` (or `$GREENLIGHT_HOME/policies/`), outside the
+repository. The snapshot contains the complete effective configuration, including
+built-in defaults, and its deterministic SHA-256 digest is recorded on each run.
+Comments, TOML formatting, and key order therefore do not change the digest;
+policy values and ordered reviewer/verification lists do.
+
+`greenlight init` creates and trusts the initial snapshot for a new installation.
+After deliberately reviewing an edited `.greenlight.toml`, update authority with:
+
+```sh
+greenlight policy update
+```
+
+This update is explicit and atomic. Running the gate, pushing a feature branch,
+or re-running `greenlight init` never imports policy changes silently. A failed
+pointer replacement leaves the prior snapshot active.
+
+Existing repositories initialized before trusted snapshots must run this
+one-command migration from a trusted checkout before their next gate run:
+
+```sh
+git switch main
+git pull --ff-only origin main
+greenlight policy update
+```
+
+Until that succeeds, `greenlight run` and the receive hook fail closed with the
+same recovery command; nothing is forwarded. Local snapshots protect policy from
+judged Git content, not from another process with the same local-user authority.
 
 ### Watch it run
 
@@ -292,6 +326,9 @@ handoff contract — any other UI can consume it the same way.
 
 ## Configure — `.greenlight.toml`
 
+This file is a candidate policy source. Editing or committing it does not change
+what the gate enforces until an operator runs `greenlight policy update`.
+
 ```toml
 [greenlight]
 max_review_rounds = 3
@@ -378,8 +415,9 @@ python -m pytest -q
 
 ```
 src/greenlight/
-  cli.py        init | run | watch | review-log | gc | hook | doctor
+  cli.py        init | policy update | run | watch | review-log | gc | hook | doctor
   gate.py       bare repo + greenlight remote + post-receive hook + gc
+  policy.py     trusted snapshots, deterministic digest, atomic updates
   worktree.py   throwaway worktree per run (+ stale-orphan sweep)
   agent.py      pi -p --mode json runner + output parsing
   config.py     .greenlight.toml schema, default reviewers

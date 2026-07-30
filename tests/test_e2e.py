@@ -47,6 +47,12 @@ def env(tmp_path, monkeypatch):
     return tmp_path, work, origin
 
 
+def _init_gate(work: Path) -> None:
+    from greenlight.cli import main
+
+    assert main(["init", "--work", str(work)]) == 0
+
+
 def _origin_has_branch(origin: Path, branch: str) -> bool:
     out = subprocess.run(["git", "branch", "--list", branch], cwd=origin,
                          capture_output=True, text=True)
@@ -57,7 +63,7 @@ def test_push_through_gate_forwards_clean_change(env):
     from greenlight import gate
 
     tmp_path, work, origin = env
-    gate.init(str(work))
+    _init_gate(work)
 
     # Feature branch with a clean backend change.
     _git(["checkout", "-b", "feat/add-greeting"], work)
@@ -80,10 +86,8 @@ def test_greenlight_run_forwards_clean_change(env):
     """The explicit `greenlight run` path validates in a worktree off the bare
     repo and forwards the result to origin (regression: it must run the pipeline
     once and forward from the bare repo, not the root)."""
-    from greenlight import gate
-
     tmp_path, work, origin = env
-    gate.init(str(work))
+    _init_gate(work)
 
     _git(["checkout", "-b", "feat/run-path"], work)
     (work / "mod.py").write_text("def add(a, b):\n    return a + b\n")
@@ -103,10 +107,8 @@ def test_greenlight_run_emits_event_stream(env):
     stream from run_start through run_end (the handoff contract the UI renders)."""
     import json
 
-    from greenlight import gate
-
     tmp_path, work, origin = env
-    gate.init(str(work))
+    _init_gate(work)
 
     _git(["checkout", "-b", "feat/events"], work)
     (work / "calc.py").write_text("def mul(a, b):\n    return a * b\n")
@@ -132,8 +134,9 @@ def test_greenlight_run_emits_event_stream(env):
     # Intent was supplied, not reconstructed.
     intent_ev = next(r for r in recs if r["type"] == "intent")
     assert intent_ev["source"] == "supplied"
-    # Classification is backend for a lone .py change.
+    # Classification and trusted policy identity are recorded at run start.
     assert recs[0]["classification"] == "backend"
+    assert len(recs[0]["policy_digest"]) == 64
 
     # The caller owns the primary stream (its own file), but the run also
     # mirrors to the per-repo default path so `greenlight watch` can render an
@@ -157,10 +160,10 @@ def test_greenlight_run_emits_event_stream(env):
 def test_run_writes_default_events_path_and_watch_once_renders(env):
     """With no GREENLIGHT_EVENTS set, the run publishes to the per-repo default
     path, and `greenlight watch --once` renders the card from it."""
-    from greenlight import events, gate
+    from greenlight import events
 
     tmp_path, work, origin = env
-    gate.init(str(work))
+    _init_gate(work)
 
     _git(["checkout", "-b", "feat/watch"], work)
     (work / "calc.py").write_text("def sub(a, b):\n    return a - b\n")

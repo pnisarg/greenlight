@@ -52,7 +52,9 @@ the fix loop wastes rounds. Never rely on the fallback when you know the intent.
 
 - Work must be **committed** on a **feature branch** (not main/master).
 - The repo must be initialized: `greenlight init` (idempotent; also writes a
-  starter `.greenlight.toml`).
+  starter `.greenlight.toml` and trusts its initial policy snapshot). Existing
+  installations without a snapshot must run `greenlight policy update` once
+  from a trusted checkout.
 - `pi` must be on PATH (greenlight drives it for review/intent/fixes). `gh` is
   optional — without it the branch is still validated and forwarded, but the PR
   is not opened.
