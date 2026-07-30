@@ -9,6 +9,3 @@ build/
 .greenlight/
 node_modules/
 package-lock.json
-
-# Local autonomous SDLC runtime (state, sessions, logs, and worktrees).
-.automation/
